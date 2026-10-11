@@ -1,0 +1,864 @@
+/**
+ * Render engine — owns the canvas stack, the gesture lifecycle, and the commit boundary.
+ *
+ * Layer model:
+ *   base    — committed pixels only. Never redrawn except on commit and on reset.
+ *   overlay — the in-progress stroke. Cleared and rebuilt every frame.
+ *   view    — the single VISIBLE canvas. Each dirty frame it composites base under overlay
+ *             *in canvas*, rather than stacking two elements with CSS.
+ *
+ * Why composite in canvas: CSS stacking hands the blend to the compositor, which blends in
+ * its own layer space (affected by `colorSpace`, layer promotion, and any future CSS
+ * `opacity`/`filter`). A translucent stroke would then look different while being drawn than
+ * after commit — a visible pop on pointerup. Compositing ourselves removes the divergence.
+ */
+
+import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
+import {
+  canRedo as historyCanRedo,
+  canUndo as historyCanUndo,
+  createHistory,
+  push,
+  redo as historyRedo,
+  undo as historyUndo,
+  visibleEntries,
+  type History,
+} from "./history";
+import {
+  FREEHAND_TOOLS,
+  isShapeTool,
+  renderRecord,
+  type PaintRecord,
+  type ShapeRecord,
+  type ToolId,
+} from "./record";
+import { isDegenerate, normalizeShape, type ShapeKind } from "./shape";
+import type { Pt } from "./stroke";
+import {
+  canvasOrigin,
+  clampZoom,
+  IDENTITY_VIEWPORT,
+  screenToRaster,
+  viewportSize,
+  zoomAtCursor,
+  type Size,
+  type Viewport,
+} from "./viewport";
+
+export const DEFAULT_FOREGROUND = "#1f2430";
+export const BACKGROUND = "#ffffff";
+
+interface StageGeometry {
+  readonly rect: DOMRectReadOnly;
+  readonly size: Size;
+}
+
+/**
+ * Whether a keyboard event originated in something the user is typing into.
+ *
+ * Text fields own their undo stack. Widgets like a range slider or checkbox do not — they
+ * must not swallow shortcuts, or using the size control would silently disable the whole
+ * keyboard layer until focus moved elsewhere.
+ */
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) {
+    return !NON_TEXT_INPUT_TYPES.has(target.type);
+  }
+  return false;
+}
+
+const NON_TEXT_INPUT_TYPES = new Set([
+  "range",
+  "checkbox",
+  "radio",
+  "button",
+  "submit",
+  "reset",
+  "color",
+  "file",
+  "image",
+]);
+
+export interface EngineSettings {
+  readonly tool: ToolId;
+  readonly foreground: string;
+  readonly width: number;
+  readonly viewport: Viewport;
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  readonly recordCount: number;
+  readonly fillShapes: boolean;
+}
+
+export class Engine {
+  readonly doc: DocModel;
+
+  /**
+   * The single source of truth for the document. The canvas is always derived by replaying
+   * `visibleEntries(history)` — never the other way round.
+   */
+  private history: History = createHistory();
+
+  private view: HTMLCanvasElement | null = null;
+  private base: HTMLCanvasElement | null = null;
+  private overlay: HTMLCanvasElement | null = null;
+
+  private viewCtx: CanvasRenderingContext2D | null = null;
+  private baseCtx: CanvasRenderingContext2D | null = null;
+  private overlayCtx: CanvasRenderingContext2D | null = null;
+
+  private viewport: Viewport = IDENTITY_VIEWPORT;
+  private tool: ToolId = "pencil";
+  private foreground = DEFAULT_FOREGROUND;
+  private width = 4;
+
+  private stage: StageGeometry | null = null;
+  private stageElement: HTMLElement | null = null;
+  private snapshot: EngineSettings = {
+    tool: "pencil",
+    foreground: DEFAULT_FOREGROUND,
+    width: 4,
+    viewport: IDENTITY_VIEWPORT,
+    canUndo: false,
+    canRedo: false,
+    recordCount: 0,
+    fillShapes: false,
+  };
+  private activePointerId: number | null = null;
+  private panPointerId: number | null = null;
+  private lastPan: Pt | null = null;
+  private spaceHeld = false;
+  private current: PaintRecord | null = null;
+  private anchor: Pt | null = null;
+  private constrain = false;
+  private fillShapes = false;
+  private frame: number | null = null;
+  private dprMediaQuery: MediaQueryList | null = null;
+  private readonly onDprChange = () => {
+    this.bindDevicePixelRatio();
+    this.relayout();
+  };
+  private readonly listeners = new Set<(settings: EngineSettings) => void>();
+
+  constructor(doc: DocModel = createDoc()) {
+    this.doc = doc;
+  }
+
+  // ─── lifecycle ────────────────────────────────────────────────────────────────
+
+  attach(view: HTMLCanvasElement, stage: HTMLElement): void {
+    this.detach();
+
+    const base = document.createElement("canvas");
+    const overlay = document.createElement("canvas");
+
+    // Pin the colour space explicitly. Leaving it to the browser reintroduces exactly the
+    // blend divergence the in-canvas compositor exists to prevent.
+    const viewCtx = view.getContext("2d", { colorSpace: "srgb" });
+    const baseCtx = base.getContext("2d", { colorSpace: "srgb" });
+    const overlayCtx = overlay.getContext("2d", { colorSpace: "srgb" });
+    if (!viewCtx || !baseCtx || !overlayCtx) {
+      throw new Error("Engine: could not acquire a 2D context");
+    }
+
+    this.view = view;
+    this.base = base;
+    this.overlay = overlay;
+    this.viewCtx = viewCtx;
+    this.baseCtx = baseCtx;
+    this.overlayCtx = overlayCtx;
+
+    base.width = rasterWidth(this.doc);
+    base.height = rasterHeight(this.doc);
+    overlay.width = base.width;
+    overlay.height = base.height;
+
+    this.reset();
+
+    view.style.position = "absolute";
+    view.style.touchAction = "none";
+
+    view.addEventListener("pointerdown", this.handlePointerDown);
+    view.addEventListener("pointermove", this.handlePointerMove);
+    view.addEventListener("pointerup", this.handlePointerUp);
+    view.addEventListener("pointercancel", this.handlePointerUp);
+    view.addEventListener("lostpointercapture", this.handlePointerUp);
+    view.addEventListener("wheel", this.handleWheel, { passive: false });
+    view.addEventListener("contextmenu", this.preventContextMenu);
+    stage.addEventListener("pointermove", this.handleStageHover);
+    window.addEventListener("keydown", this.handleKeyDown);
+    window.addEventListener("keyup", this.handleKeyUp);
+    window.addEventListener("keydown", this.handleModifierChange);
+    window.addEventListener("keyup", this.handleModifierChange);
+
+    this.stageElement = stage;
+    this.stage = { rect: stage.getBoundingClientRect(), size: this.measure(stage) };
+    this.fitToStage();
+    this.bindDevicePixelRatio();
+    this.relayout();
+  }
+
+  /**
+   * Zoom so the whole document fits inside the stage (never magnifying past 1:1).
+   *
+   * This is not just convenience. The stage clips with `overflow: hidden`, so a canvas
+   * taller than the stage is visually AND hit-test truncated, while `getBoundingClientRect()`
+   * still reports its full unclipped box. Drawing into the clipped region silently hits the
+   * page behind the canvas instead. Fitting on attach keeps the canvas fully inside its
+   * stage, which keeps pointer coordinates honest.
+   */
+  fitToStage(): void {
+    const stage = this.stage;
+    if (!stage || stage.size.width <= 0 || stage.size.height <= 0) return;
+
+    const fit = Math.min(
+      stage.size.width / this.doc.logicalWidth,
+      stage.size.height / this.doc.logicalHeight,
+      1,
+    );
+    this.viewport = { ...this.viewport, zoom: clampZoom(fit) };
+    this.refreshSnapshot();
+    this.relayout();
+    this.emit();
+  }
+
+  detach(): void {
+    const view = this.view;
+    if (view) {
+      view.removeEventListener("pointerdown", this.handlePointerDown);
+      view.removeEventListener("pointermove", this.handlePointerMove);
+      view.removeEventListener("pointerup", this.handlePointerUp);
+      view.removeEventListener("pointercancel", this.handlePointerUp);
+      view.removeEventListener("lostpointercapture", this.handlePointerUp);
+      view.removeEventListener("wheel", this.handleWheel);
+      view.removeEventListener("contextmenu", this.preventContextMenu);
+    }
+    window.removeEventListener("keydown", this.handleKeyDown);
+    window.removeEventListener("keyup", this.handleKeyUp);
+    window.removeEventListener("keydown", this.handleModifierChange);
+    window.removeEventListener("keyup", this.handleModifierChange);
+    this.stageElement?.removeEventListener("pointermove", this.handleStageHover);
+    this.stageElement = null;
+    this.dprMediaQuery?.removeEventListener("change", this.onDprChange);
+    this.dprMediaQuery = null;
+
+    if (this.frame !== null) {
+      cancelAnimationFrame(this.frame);
+      this.frame = null;
+    }
+
+    this.view = null;
+    this.base = null;
+    this.overlay = null;
+    this.viewCtx = null;
+    this.baseCtx = null;
+    this.overlayCtx = null;
+    this.stage = null;
+    this.activePointerId = null;
+    this.panPointerId = null;
+    this.current = null;
+    this.anchor = null;
+  }
+
+  private measure(stage: HTMLElement): Size {
+    return { width: stage.clientWidth, height: stage.clientHeight };
+  }
+
+  setStageSize(size: Size): void {
+    if (!this.stage) return;
+    this.stage = { rect: this.stage.rect, size };
+    this.relayout();
+  }
+
+  private bindDevicePixelRatio(): void {
+    this.dprMediaQuery?.removeEventListener("change", this.onDprChange);
+    this.dprMediaQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    this.dprMediaQuery.addEventListener("change", this.onDprChange);
+  }
+
+  // ─── settings ─────────────────────────────────────────────────────────────────
+
+  subscribe(listener: (settings: EngineSettings) => void): () => void {
+    this.listeners.add(listener);
+    listener(this.snapshot);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /**
+   * MUST return a referentially stable snapshot. `useSyncExternalStore` compares the
+   * result by identity and re-renders forever if a fresh object is minted on every call.
+   */
+  settings(): EngineSettings {
+    return this.snapshot;
+  }
+
+  private refreshSnapshot(): void {
+    this.snapshot = {
+      tool: this.tool,
+      foreground: this.foreground,
+      width: this.width,
+      viewport: this.viewport,
+      canUndo: historyCanUndo(this.history),
+      canRedo: historyCanRedo(this.history),
+      recordCount: this.history.entries.length,
+      fillShapes: this.fillShapes,
+    };
+  }
+
+  private emit(): void {
+    this.refreshSnapshot();
+    const next = this.snapshot;
+    for (const listener of this.listeners) listener(next);
+  }
+
+  setTool(tool: ToolId): void {
+    if (this.tool === tool) return;
+    this.tool = tool;
+    this.emit();
+    this.applyCursor();
+  }
+
+  setWidth(width: number): void {
+    const next = clampStrokeWidth(width);
+    if (this.width === next) return;
+    this.width = next;
+    this.emit();
+    this.applyCursor();
+  }
+
+  setForeground(color: string): void {
+    this.foreground = color;
+    this.emit();
+  }
+
+  /** When on, shapes are filled with the foreground colour as well as outlined. */
+  setFillShapes(fill: boolean): void {
+    if (this.fillShapes === fill) return;
+    this.fillShapes = fill;
+    this.emit();
+  }
+
+  // ─── viewport ─────────────────────────────────────────────────────────────────
+
+  setZoom(zoom: number): void {
+    if (!this.stage) return;
+    const anchor = {
+      x: this.stage.rect.x + this.stage.size.width / 2,
+      y: this.stage.rect.y + this.stage.size.height / 2,
+    };
+    this.viewport = zoomAtCursor(
+      this.stage.rect,
+      this.stage.size,
+      this.doc,
+      this.viewport,
+      anchor,
+      zoom,
+    );
+    this.relayout();
+    this.emit();
+  }
+
+  panBy(dx: number, dy: number): void {
+    this.viewport = {
+      ...this.viewport,
+      panX: this.viewport.panX + dx,
+      panY: this.viewport.panY + dy,
+    };
+    // Pan does not change the zoom readout, so refresh the snapshot without notifying.
+    this.refreshSnapshot();
+    this.relayout();
+  }
+
+  /** Position and size the canvas element for the current viewport, then redraw. */
+  private relayout(): void {
+    const view = this.view;
+    const stage = this.stage;
+    if (!view || !stage) return;
+
+    const css = viewportSize(this.doc, this.viewport);
+    const origin = canvasOrigin(stage.size, this.doc, this.viewport);
+    const dpr = window.devicePixelRatio || 1;
+
+    view.style.left = `${origin.x}px`;
+    view.style.top = `${origin.y}px`;
+    view.style.width = `${css.width}px`;
+    view.style.height = `${css.height}px`;
+
+    const w = Math.max(1, Math.round(css.width * dpr));
+    const h = Math.max(1, Math.round(css.height * dpr));
+    if (view.width !== w || view.height !== h) {
+      view.width = w;
+      view.height = h;
+    }
+
+    this.requestRender();
+  }
+
+  // ─── rendering ────────────────────────────────────────────────────────────────
+
+  private requestRender(): void {
+    if (this.frame !== null) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = null;
+      this.render();
+    });
+  }
+
+  private render(): void {
+    const viewCtx = this.viewCtx;
+    const base = this.base;
+    const overlay = this.overlay;
+    const view = this.view;
+    if (!viewCtx || !base || !overlay || !view) return;
+
+    viewCtx.save();
+    try {
+      // Identity transform before clearing: `clearRect` is subject to the current matrix,
+      // so a leftover scale would clear only a fraction of the surface and leave ghosts.
+      viewCtx.setTransform(1, 0, 0, 1, 0, 0);
+      viewCtx.clearRect(0, 0, view.width, view.height);
+      viewCtx.drawImage(base, 0, 0, view.width, view.height);
+      viewCtx.drawImage(overlay, 0, 0, view.width, view.height);
+    } finally {
+      viewCtx.restore();
+    }
+  }
+
+  private paintOverlay(): void {
+    const ctx = this.overlayCtx;
+    const overlay = this.overlay;
+    if (!ctx || !overlay) return;
+
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      if (this.current) renderRecord(ctx, this.current, this.doc.rasterScale);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  /**
+   * "Clear" discards the document and its history. Deliberately NOT undoable — the
+   * equivalent of Paint's "New".
+   */
+  reset(): void {
+    this.history = createHistory();
+    this.repaintBase();
+    this.requestRender();
+    this.emit();
+  }
+
+  /**
+   * The commit boundary. Every gesture funnels through here: the record goes into history
+   * (the source of truth) and is then rasterised onto the base canvas.
+   */
+  private commit(record: PaintRecord): void {
+    const next = push(this.history, record);
+    const branched = next.entries.length !== this.history.entries.length + 1;
+
+    this.history = next;
+
+    // Pushing while the cursor was behind the end discards the abandoned future. The base
+    // canvas still holds those pixels, so it must be rebuilt rather than merely appended to.
+    if (branched) this.repaintBase();
+    else this.paintRecord(record);
+
+    this.clearOverlay();
+    this.requestRender();
+    this.emit();
+  }
+
+  private paintRecord(record: PaintRecord): void {
+    const ctx = this.baseCtx;
+    if (!ctx) return;
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      renderRecord(ctx, record, this.doc.rasterScale);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Rebuild the base canvas from scratch by replaying history. This is the ONLY path that
+   * produces document pixels from records — undo, redo, branching, and `loadRecords` all
+   * go through here, so live drawing and replay can never drift apart.
+   */
+  private repaintBase(): void {
+    const ctx = this.baseCtx;
+    const base = this.base;
+    if (!ctx || !base) return;
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = BACKGROUND;
+      ctx.fillRect(0, 0, base.width, base.height);
+      for (const record of visibleEntries(this.history)) {
+        renderRecord(ctx, record, this.doc.rasterScale);
+      }
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  // ─── history ──────────────────────────────────────────────────────────────────
+
+  undo(): void {
+    const next = historyUndo(this.history);
+    if (next === this.history) return;
+    this.history = next;
+    this.repaintBase();
+    this.clearOverlay();
+    this.requestRender();
+    this.emit();
+  }
+
+  redo(): void {
+    const next = historyRedo(this.history);
+    if (next === this.history) return;
+    this.history = next;
+    this.repaintBase();
+    this.clearOverlay();
+    this.requestRender();
+    this.emit();
+  }
+
+  canUndo(): boolean {
+    return historyCanUndo(this.history);
+  }
+
+  canRedo(): boolean {
+    return historyCanRedo(this.history);
+  }
+
+  /**
+   * Replace the document with a supplied record list. Used to replay a persisted document
+   * and by the replay benchmark; the canvas is derived from these records exactly as it is
+   * from drawn ones.
+   */
+  loadRecords(records: readonly PaintRecord[]): void {
+    this.history = createHistory();
+    for (const record of records) this.history = push(this.history, record);
+    this.repaintBase();
+    this.clearOverlay();
+    this.requestRender();
+    this.emit();
+  }
+
+  private clearOverlay(): void {
+    const ctx = this.overlayCtx;
+    const overlay = this.overlay;
+    if (!ctx || !overlay) return;
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+    } finally {
+      ctx.restore();
+    }
+  }
+
+  // ─── gesture lifecycle ────────────────────────────────────────────────────────
+
+  private toRaster(event: { clientX: number; clientY: number }): Pt | null {
+    const stage = this.stage;
+    if (!stage) return null;
+    return screenToRaster(
+      { x: event.clientX, y: event.clientY },
+      stage.rect,
+      stage.size,
+      this.doc,
+      this.viewport,
+    );
+  }
+
+  private beginGesture(event: PointerEvent): void {
+    const point = this.toRaster(event);
+    if (!point) return;
+
+    if (isShapeTool(this.tool)) {
+      this.anchor = point;
+      this.current = this.buildShape(point, point);
+    } else {
+      // The eraser paints the background colour. It deliberately does NOT use
+      // destination-out: the overlay starts transparent, so a destination-out pass there
+      // would erase nothing at all.
+      const color = this.tool === "eraser" ? BACKGROUND : this.foreground;
+      this.current = {
+        kind: "stroke",
+        tool: this.tool,
+        composite: "source-over",
+        color,
+        width: this.width,
+        points: [point],
+      };
+    }
+
+    this.paintOverlay();
+    this.requestRender();
+  }
+
+  private buildShape(from: Pt, to: Pt): ShapeRecord {
+    const geometry = normalizeShape(this.tool as ShapeKind, from, to, this.constrain);
+    return {
+      kind: "shape",
+      shape: geometry.kind,
+      from: geometry.from,
+      to: geometry.to,
+      strokeColor: this.foreground,
+      fillColor: this.fillShapes ? this.foreground : null,
+      strokeWidth: this.width,
+    };
+  }
+
+  private extendGesture(event: PointerEvent): void {
+    const active = this.current;
+    if (!active) return;
+
+    if (isShapeTool(this.tool) && this.anchor) {
+      const point = this.toRaster(event);
+      if (point) this.current = this.buildShape(this.anchor, point);
+    } else if (active.kind === "stroke") {
+      const points = active.points as Pt[];
+      // Coalesced events carry the full input sample rate. The `pointerdown` coordinate is
+      // NOT among them, which is why `beginGesture` seeds the list first.
+      const samples =
+        typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+      if (samples.length > 0) {
+        for (const sample of samples) {
+          const point = this.toRaster(sample);
+          if (point) points.push(point);
+        }
+      } else {
+        const point = this.toRaster(event);
+        if (point) points.push(point);
+      }
+    }
+
+    this.paintOverlay();
+    this.requestRender();
+  }
+
+  private endGesture(): void {
+    const record = this.current;
+    this.current = null;
+    this.anchor = null;
+    this.activePointerId = null;
+
+    if (!record) {
+      this.clearOverlay();
+    } else if (
+      record.kind === "shape" &&
+      isDegenerate({ kind: record.shape, from: record.from, to: record.to })
+    ) {
+      // A zero-extent shape renders as nothing, so it is never worth entering history.
+      this.clearOverlay();
+    } else {
+      this.commit(record);
+    }
+    this.requestRender();
+  }
+
+  private cancelGesture(): void {
+    this.current = null;
+    this.anchor = null;
+    this.activePointerId = null;
+    this.clearOverlay();
+    this.requestRender();
+  }
+
+  private handlePointerDown = (event: PointerEvent): void => {
+    if (event.button === 1 || (this.spaceHeld && event.button === 0)) {
+      this.panPointerId = event.pointerId;
+      this.lastPan = { x: event.clientX, y: event.clientY };
+      this.view?.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      return;
+    }
+
+    if (event.button !== 0) return;
+
+    // Single-active-pointer invariant: a second concurrent pointer must not overwrite the
+    // in-progress stroke's points or be adopted by the first stroke's pointerup.
+    if (this.activePointerId !== null) return;
+
+    this.activePointerId = event.pointerId;
+    this.view?.setPointerCapture(event.pointerId);
+    this.beginGesture(event);
+    event.preventDefault();
+  };
+
+  private handlePointerMove = (event: PointerEvent): void => {
+    if (event.pointerId === this.panPointerId && this.lastPan) {
+      this.panBy(event.clientX - this.lastPan.x, event.clientY - this.lastPan.y);
+      this.lastPan = { x: event.clientX, y: event.clientY };
+      return;
+    }
+
+    if (event.pointerId !== this.activePointerId) return;
+
+    // Hover filter. Pointer moves fire with buttons === 0; without this a pen or mouse
+    // merely passing over the canvas would draw.
+    if (event.buttons === 0) {
+      this.cancelGesture();
+      return;
+    }
+
+    this.extendGesture(event);
+    event.preventDefault();
+  };
+
+  private handlePointerUp = (event: PointerEvent): void => {
+    if (event.pointerId === this.panPointerId) {
+      this.panPointerId = null;
+      this.lastPan = null;
+      return;
+    }
+    if (event.pointerId !== this.activePointerId) return;
+    this.endGesture();
+  };
+
+  private handleStageHover = (event: PointerEvent): void => {
+    // If a gesture is somehow left active with no buttons pressed (lost focus, synthetic
+    // event), release it rather than letting the canvas latch in a drawing state.
+    if (event.pointerId === this.activePointerId && event.buttons === 0) {
+      this.cancelGesture();
+    }
+  };
+
+  private handleWheel = (event: WheelEvent): void => {
+    const stage = this.stage;
+    if (!stage) return;
+    event.preventDefault();
+
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    const nextZoom = clampZoom(this.viewport.zoom * factor);
+
+    // Anchor on the cursor so the document point under it stays put.
+    this.viewport = zoomAtCursor(
+      stage.rect,
+      stage.size,
+      this.doc,
+      this.viewport,
+      { x: event.clientX, y: event.clientY },
+      nextZoom,
+    );
+    this.relayout();
+    this.emit();
+  };
+
+  private handleKeyDown = (event: KeyboardEvent): void => {
+    if (event.code === "Space" && !this.spaceHeld) {
+      this.spaceHeld = true;
+      this.applyCursor();
+      event.preventDefault();
+      return;
+    }
+    // Only text-entry contexts should swallow shortcuts. A focused range slider must not
+    // disable undo or the tool keys — otherwise touching the size control silently kills
+    // the whole keyboard layer.
+    if (isTextEntryTarget(event.target)) return;
+
+    const accel = event.ctrlKey || event.metaKey;
+    if (accel && !event.altKey) {
+      const key = event.key.toLowerCase();
+      // Cmd/Ctrl+Z is undo; redo is either Shift+Z or the legacy Y.
+      if (key === "z" && !event.shiftKey) {
+        this.undo();
+        event.preventDefault();
+        return;
+      }
+      if ((key === "z" && event.shiftKey) || key === "y") {
+        this.redo();
+        event.preventDefault();
+        return;
+      }
+      return;
+    }
+
+    if (event.key === "1") this.setTool("pencil");
+    if (event.key === "2") this.setTool("eraser");
+    if (event.key === "3") this.setTool("line");
+    if (event.key === "4") this.setTool("rect");
+    if (event.key === "5") this.setTool("ellipse");
+    if (event.key === "[") this.setWidth(this.width - 1);
+    if (event.key === "]") this.setWidth(this.width + 1);
+  };
+
+  /** Track Shift so shape drags can constrain to 45°/square/circle. */
+  private handleModifierChange = (event: KeyboardEvent): void => {
+    if (event.key !== "Shift") return;
+    this.constrain = event.shiftKey;
+    // A held modifier only matters mid-drag; re-render so the preview tightens immediately.
+    if (this.current) {
+      this.paintOverlay();
+      this.requestRender();
+    }
+  };
+
+  private handleKeyUp = (event: KeyboardEvent): void => {
+    if (event.code === "Space") {
+      this.spaceHeld = false;
+      this.applyCursor();
+    }
+  };
+
+  private applyCursor(): void {
+    if (!this.view) return;
+    if (this.spaceHeld) {
+      this.view.style.cursor = "grab";
+      return;
+    }
+    this.view.style.cursor =
+      this.tool === "eraser" ? "cell" : FREEHAND_TOOLS.has(this.tool) ? "crosshair" : "copy";
+  }
+
+  private preventContextMenu = (event: Event): void => {
+    event.preventDefault();
+  };
+
+  /** Debug/e2e affordance: the committed pixel buffer as a data URL. */
+  snapshotDataUrl(): string | null {
+    return this.base?.toDataURL("image/png") ?? null;
+  }
+
+  /** Debug/e2e affordance: committed record count. */
+  get recordCount(): number {
+    return this.history.entries.length;
+  }
+
+  /**
+   * Debug/e2e affordance: a structured copy of history. Tests assert on record geometry
+   * directly rather than inferring it from rendered pixels.
+   */
+  historyEntries(): PaintRecord[] {
+    return structuredClone(this.history.entries) as PaintRecord[];
+  }
+
+  /**
+   * Debug/e2e affordance: count of non-background pixels in the committed document.
+   * Used to prove a render actually put ink down, so a comparison test cannot pass
+   * vacuously against a blank canvas.
+   */
+  documentInkCount(): number {
+    const ctx = this.baseCtx;
+    const base = this.base;
+    if (!ctx || !base) return 0;
+
+    const { data } = ctx.getImageData(0, 0, base.width, base.height);
+    let ink = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      // Background is opaque white; count anything meaningfully darker.
+      if (data[i]! < 240 || data[i + 1]! < 240 || data[i + 2]! < 240) ink++;
+    }
+    return ink;
+  }
+}
