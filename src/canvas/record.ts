@@ -24,19 +24,20 @@ export function isShapeTool(tool: ToolId): tool is ShapeKind {
 }
 
 /**
- * Composite mode for the record. Always `source-over` in slice 1 — the eraser paints the
- * background colour rather than punching a hole, which keeps the canvas opaque and avoids
- * the "destination-out against a transparent overlay erases nothing" trap.
+ * How a record combines with what is already on the canvas.
  *
- * The field exists now so slice 2 can add real transparency without a record-type change.
+ * `destination-out` is what makes the eraser erase to *nothing* rather than painting a
+ * colour over things. Slice 1 reserved this field precisely so that adding real transparency
+ * would not require a new record type.
  */
-export type CompositeOp = "source-over";
+export type CompositeOp = "source-over" | "destination-out";
 
 export interface StrokeRecord {
   readonly kind: "stroke";
   readonly tool: ToolId;
   readonly composite: CompositeOp;
-  /** Resolved CSS colour. Stored resolved, not as a palette index, so replay is stable. */
+  /** Resolved CSS colour. Stored resolved, not as a palette index, so replay is stable.
+   *  Ignored under `destination-out`, where the source alpha is what matters. */
   readonly color: string;
   /** Stroke width in LOGICAL (CSS) pixels, independent of raster scale. */
   readonly width: number;
@@ -165,6 +166,9 @@ export function renderRecord(
     }
     const ops = strokeToOps(record.points, record.width);
     if (ops.length === 0) return;
+
+    // Set inside the save/restore pair so the composite never leaks to the caller.
+    ctx.globalCompositeOperation = record.composite;
     paintOps(ctx, ops, record.color, clampStrokeWidth(record.width) * rasterScale);
   } finally {
     ctx.restore();

@@ -13,7 +13,7 @@
  * after commit — a visible pop on pointerup. Compositing ourselves removes the divergence.
  */
 
-import { normalizeHex, parseHex } from "./color";
+import { normalizeHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
 import {
   canRedo as historyCanRedo,
@@ -31,6 +31,7 @@ import {
   renderRecord,
   type PaintRecord,
   type ShapeRecord,
+  type StrokeRecord,
   type ToolId,
 } from "./record";
 import { isDegenerate, normalizeShape, type ShapeKind } from "./shape";
@@ -47,6 +48,8 @@ import {
 } from "./viewport";
 
 export const DEFAULT_FOREGROUND = "#1f2430";
+/** The secondary painting colour. No longer the document background — the document is
+ *  transparent, and the eraser erases to nothing rather than to this. */
 export const DEFAULT_BACKGROUND = "#ffffff";
 
 interface StageGeometry {
@@ -69,6 +72,12 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
     return !NON_TEXT_INPUT_TYPES.has(target.type);
   }
   return false;
+}
+
+/** Whether the record currently in progress is an erase, which cannot be previewed on the
+ *  additive overlay. Shape records are always additive. */
+function isEraseInProgress(record: PaintRecord | null): record is StrokeRecord {
+  return record !== null && record.kind === "stroke" && record.composite === "destination-out";
 }
 
 const NON_TEXT_INPUT_TYPES = new Set([
@@ -355,7 +364,9 @@ export class Engine {
     this.emit();
   }
 
-  /** Set the secondary colour: what the eraser paints, and what a reset canvas fills with. */
+  /** Set the secondary painting colour. It is a second colour to draw with, not the
+   *  document background and not the eraser — the document is transparent and the eraser
+   *  erases to nothing. */
   setBackground(color: string): void {
     const next = normalizeHex(color);
     if (!next || next === this.background) return;
@@ -459,6 +470,15 @@ export class Engine {
       viewCtx.clearRect(0, 0, view.width, view.height);
       viewCtx.drawImage(base, 0, 0, view.width, view.height);
       viewCtx.drawImage(overlay, 0, 0, view.width, view.height);
+
+      // The in-progress erase is applied last, directly on the view. During an erase gesture
+      // the additive overlay is empty by construction, so this removes only base content —
+      // and it costs no extra full-size mask canvas.
+      if (isEraseInProgress(this.current)) {
+        const scale = view.width / base.width;
+        viewCtx.setTransform(scale, 0, 0, scale, 0, 0);
+        renderRecord(viewCtx, this.current, this.doc.rasterScale);
+      }
     } finally {
       viewCtx.restore();
     }
@@ -473,7 +493,11 @@ export class Engine {
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, overlay.width, overlay.height);
-      if (this.current) renderRecord(ctx, this.current, this.doc.rasterScale);
+      // Erases are NOT drawn here. The overlay is additive; a destination-out pass against
+      // a transparent layer would remove nothing. They are composited onto the view instead.
+      if (this.current && !isEraseInProgress(this.current)) {
+        renderRecord(ctx, this.current, this.doc.rasterScale);
+      }
     } finally {
       ctx.restore();
     }
@@ -534,8 +558,9 @@ export class Engine {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = this.background;
-      ctx.fillRect(0, 0, base.width, base.height);
+      // Transparent, not white: the document has a real alpha channel and "New" means
+      // nothing rather than a sheet of paper.
+      ctx.clearRect(0, 0, base.width, base.height);
       for (const record of visibleEntries(this.history)) {
         renderRecord(ctx, record, this.doc.rasterScale);
       }
@@ -623,15 +648,16 @@ export class Engine {
       this.anchor = point;
       this.current = this.buildShape(point, point);
     } else {
-      // The eraser paints the secondary colour. It deliberately does NOT use
-      // destination-out: the overlay starts transparent, so a destination-out pass there
-      // would erase nothing at all.
-      const color = this.tool === "eraser" ? this.background : this.foreground;
+      // The eraser is a stroke record with `destination-out`, so it erases to NOTHING
+      // rather than painting a colour over things. Because the additive overlay starts
+      // transparent, an erase cannot be previewed there — it is composited onto the view
+      // directly during rendering instead.
+      const erasing = this.tool === "eraser";
       this.current = {
         kind: "stroke",
         tool: this.tool,
-        composite: "source-over",
-        color,
+        composite: erasing ? "destination-out" : "source-over",
+        color: erasing ? "" : this.foreground,
         width: this.width,
         points: [point],
       };
@@ -890,15 +916,12 @@ export class Engine {
     const base = this.base;
     if (!ctx || !base) return 0;
 
-    // Compare against the ACTUAL background. A fixed white threshold reports every pixel as
-    // ink the moment the canvas is filled with anything dark.
-    const background = parseHex(this.background);
+    // Alpha-based: the document has no background colour to compare against, so "ink" means
+    // "not transparent". A fixed colour threshold would have counted an erased pixel as ink.
     const { data } = ctx.getImageData(0, 0, base.width, base.height);
     let ink = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i] !== background.r || data[i + 1] !== background.g || data[i + 2] !== background.b) {
-        ink++;
-      }
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i]! > 0) ink++;
     }
     return ink;
   }

@@ -129,35 +129,43 @@ test("shortcuts stay inert while typing a hex value", async ({ page }) => {
   expect(await colours(page)).toEqual({ foreground: "#ff0000", background: "#ffffff" });
 });
 
-test("the eraser paints the secondary colour, not white", async ({ page }) => {
+test("the eraser ignores the secondary colour and erases to transparency", async ({ page }) => {
+  // The eraser used to paint colour 2. It now erases to alpha 0, so the secondary colour
+  // no longer influences it at all.
   await setWidth(page, 10);
   await pickPalette(page, "#000000");
   await drawStroke(page, { x: 60, y: 150 }, { x: 380, y: 150 }, { steps: 20 });
 
   await page.getByTestId("swatch-background").click();
   await setHex(page, "#1b9e77");
-  expect((await colours(page)).background).toBe("#1b9e77");
 
   await setTool(page, "eraser");
   await drawStroke(page, { x: 150, y: 90 }, { x: 150, y: 220 }, { steps: 14 });
 
-  // Count pixels matching the eraser colour, within a tolerance for antialiased edges.
-  // A white-gapped eraser would leave zero here.
-  const eraserPixels = await page.evaluate(() => {
+  const counts = await page.evaluate(() => {
     const canvas = document.querySelector("canvas.surface") as HTMLCanvasElement;
     const ctx = canvas.getContext("2d")!;
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const near = (a: number, b: number) => Math.abs(a - b) < 45;
-    let count = 0;
+    let green = 0;
+    let white = 0;
+    let transparent = 0;
     for (let i = 0; i < data.length; i += 4) {
-      if (near(data[i]!, 0x1b) && near(data[i + 1]!, 0x9e) && near(data[i + 2]!, 0x77)) count++;
+      if (data[i + 3] === 0) transparent++;
+      else if (near(data[i]!, 0x1b) && near(data[i + 1]!, 0x9e) && near(data[i + 2]!, 0x77)) green++;
+      else if (near(data[i]!, 255) && near(data[i + 1]!, 255) && near(data[i + 2]!, 255)) white++;
     }
-    return count;
+    return { green, white, transparent };
   });
-  expect(eraserPixels).toBeGreaterThan(200);
+
+  // Neither the eraser colour nor white appears — the gap is genuinely transparent.
+  expect(counts.green).toBe(0);
+  expect(counts.white).toBe(0);
+  expect(counts.transparent).toBeGreaterThan(1000);
 });
 
-test("reset paints the secondary colour as the canvas background", async ({ page }) => {
+test("the secondary colour does not tint the document", async ({ page }) => {
+  // Colour 2 is a second painting colour, not a canvas background. The document has none.
   await setWidth(page, 12);
   await pickPalette(page, "#000000");
   await drawStroke(page, { x: 60, y: 60 }, { x: 360, y: 260 }, { steps: 18 });
@@ -168,16 +176,15 @@ test("reset paints the secondary colour as the canvas background", async ({ page
   await page.getByRole("button", { name: "Clear" }).click();
   await page.waitForTimeout(100);
 
-  // A dark background means the old white-threshold ink counter would see ink everywhere.
   expect(await ink(page)).toBe(0);
 
   const centre = await page.evaluate(() => {
     const canvas = document.querySelector("canvas.surface") as HTMLCanvasElement;
     const ctx = canvas.getContext("2d")!;
-    const [r, g, b] = ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
-    return { r, g, b };
+    const [r, g, b, a] = ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
+    return { r, g, b, a };
   });
-  expect(centre).toEqual({ r: 0x3a, g: 0x0c, b: 0xa3 });
+  expect(centre).toEqual({ r: 0, g: 0, b: 0, a: 0 });
 });
 
 test("drawing and undoing work on a dark background", async ({ page }) => {
