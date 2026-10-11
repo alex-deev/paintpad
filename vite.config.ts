@@ -17,6 +17,7 @@ export default defineConfig({
       // `main.tsx` need a real canvas, so they are gated by the Playwright goldens
       // instead of a node coverage number.
       include: [
+        "src/canvas/color.ts",
         "src/canvas/document.ts",
         "src/canvas/history.ts",
         "src/canvas/shape.ts",
