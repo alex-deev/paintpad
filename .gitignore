@@ -1,0 +1,14 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+test-results
+playwright-report
+coverage
+.vite
+*.tsbuildinfo
+
+# Locally-extracted Chromium shared libraries (no root in the devcontainer).
+# Recreate with: npm run browser:deps
+.playwright-deps/

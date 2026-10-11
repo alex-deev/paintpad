@@ -1,0 +1,23 @@
+{
+  "name": "PaintPad",
+  "build": {
+    "dockerfile": "Dockerfile",
+  },
+  "forwardPorts": [5173],
+  "mounts": [
+    "source=paintpad-node-cache,target=${containerWorkspaceFolder}/node_modules,type=volume"
+  ],
+  "postCreateCommand": "npm install --prefer-offline",
+  "remoteUser": "node",
+  "runArgs": ["--userns=keep-id", "--name", "PaintPad", "--memory=2g"],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "streetsidesoftware.code-spell-checker",
+	"streetsidesoftware.code-spell-checker-spanish",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss"
+      ]
+    }
+  }
+}
