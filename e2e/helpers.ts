@@ -12,6 +12,8 @@ declare global {
       documentInkCount(): number;
       settings(): {
         tool: ToolId;
+        foreground: string;
+        background: string;
         viewport: { zoom: number; panX: number; panY: number };
       };
       undo(): void;

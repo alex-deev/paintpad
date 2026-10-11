@@ -13,6 +13,7 @@
  * after commit — a visible pop on pointerup. Compositing ourselves removes the divergence.
  */
 
+import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
 import {
   canRedo as historyCanRedo,
@@ -46,7 +47,7 @@ import {
 } from "./viewport";
 
 export const DEFAULT_FOREGROUND = "#1f2430";
-export const BACKGROUND = "#ffffff";
+export const DEFAULT_BACKGROUND = "#ffffff";
 
 interface StageGeometry {
   readonly rect: DOMRectReadOnly;
@@ -85,6 +86,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
 export interface EngineSettings {
   readonly tool: ToolId;
   readonly foreground: string;
+  readonly background: string;
   readonly width: number;
   readonly viewport: Viewport;
   readonly canUndo: boolean;
@@ -113,6 +115,7 @@ export class Engine {
   private viewport: Viewport = IDENTITY_VIEWPORT;
   private tool: ToolId = "pencil";
   private foreground = DEFAULT_FOREGROUND;
+  private background = DEFAULT_BACKGROUND;
   private width = 4;
 
   private stage: StageGeometry | null = null;
@@ -120,6 +123,7 @@ export class Engine {
   private snapshot: EngineSettings = {
     tool: "pencil",
     foreground: DEFAULT_FOREGROUND,
+    background: DEFAULT_BACKGROUND,
     width: 4,
     viewport: IDENTITY_VIEWPORT,
     canUndo: false,
@@ -135,6 +139,8 @@ export class Engine {
   private anchor: Pt | null = null;
   private constrain = false;
   private fillShapes = false;
+  /** Once the user zooms, stop auto-fitting on stage resize. */
+  private userAdjustedZoom = false;
   private frame: number | null = null;
   private dprMediaQuery: MediaQueryList | null = null;
   private readonly onDprChange = () => {
@@ -220,6 +226,8 @@ export class Engine {
       1,
     );
     this.viewport = { ...this.viewport, zoom: clampZoom(fit) };
+    // An explicit Fit hands zoom control back to the stage, so later resizes keep fitting.
+    this.userAdjustedZoom = false;
     this.refreshSnapshot();
     this.relayout();
     this.emit();
@@ -270,7 +278,11 @@ export class Engine {
   setStageSize(size: Size): void {
     if (!this.stage) return;
     this.stage = { rect: this.stage.rect, size };
-    this.relayout();
+    // Keep fitting to the stage until the user takes control of the zoom. Without this, a
+    // boot where the stage has no size yet leaves the canvas at 1:1, positioned far above
+    // the viewport and clipped away — drawing then silently lands nowhere.
+    if (!this.userAdjustedZoom) this.fitToStage();
+    else this.relayout();
   }
 
   private bindDevicePixelRatio(): void {
@@ -301,6 +313,7 @@ export class Engine {
     this.snapshot = {
       tool: this.tool,
       foreground: this.foreground,
+      background: this.background,
       width: this.width,
       viewport: this.viewport,
       canUndo: historyCanUndo(this.history),
@@ -331,8 +344,29 @@ export class Engine {
     this.applyCursor();
   }
 
+  /**
+   * Set the drawing colour. Input is normalised here rather than trusted from the UI, so a
+   * malformed value can never be baked into a record where it would poison every replay.
+   */
   setForeground(color: string): void {
-    this.foreground = color;
+    const next = normalizeHex(color);
+    if (!next || next === this.foreground) return;
+    this.foreground = next;
+    this.emit();
+  }
+
+  /** Set the secondary colour: what the eraser paints, and what a reset canvas fills with. */
+  setBackground(color: string): void {
+    const next = normalizeHex(color);
+    if (!next || next === this.background) return;
+    this.background = next;
+    this.emit();
+  }
+
+  swapColors(): void {
+    const previous = this.foreground;
+    this.foreground = this.background;
+    this.background = previous;
     this.emit();
   }
 
@@ -347,6 +381,7 @@ export class Engine {
 
   setZoom(zoom: number): void {
     if (!this.stage) return;
+    this.userAdjustedZoom = true;
     const anchor = {
       x: this.stage.rect.x + this.stage.size.width / 2,
       y: this.stage.rect.y + this.stage.size.height / 2,
@@ -499,7 +534,7 @@ export class Engine {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = BACKGROUND;
+      ctx.fillStyle = this.background;
       ctx.fillRect(0, 0, base.width, base.height);
       for (const record of visibleEntries(this.history)) {
         renderRecord(ctx, record, this.doc.rasterScale);
@@ -588,10 +623,10 @@ export class Engine {
       this.anchor = point;
       this.current = this.buildShape(point, point);
     } else {
-      // The eraser paints the background colour. It deliberately does NOT use
+      // The eraser paints the secondary colour. It deliberately does NOT use
       // destination-out: the overlay starts transparent, so a destination-out pass there
       // would erase nothing at all.
-      const color = this.tool === "eraser" ? BACKGROUND : this.foreground;
+      const color = this.tool === "eraser" ? this.background : this.foreground;
       this.current = {
         kind: "stroke",
         tool: this.tool,
@@ -739,6 +774,7 @@ export class Engine {
     if (!stage) return;
     event.preventDefault();
 
+    this.userAdjustedZoom = true;
     const factor = Math.exp(-event.deltaY * 0.0015);
     const nextZoom = clampZoom(this.viewport.zoom * factor);
 
@@ -791,6 +827,7 @@ export class Engine {
     if (event.key === "5") this.setTool("ellipse");
     if (event.key === "[") this.setWidth(this.width - 1);
     if (event.key === "]") this.setWidth(this.width + 1);
+    if (event.key === "x" || event.key === "X") this.swapColors();
   };
 
   /** Track Shift so shape drags can constrain to 45°/square/circle. */
@@ -853,11 +890,15 @@ export class Engine {
     const base = this.base;
     if (!ctx || !base) return 0;
 
+    // Compare against the ACTUAL background. A fixed white threshold reports every pixel as
+    // ink the moment the canvas is filled with anything dark.
+    const background = parseHex(this.background);
     const { data } = ctx.getImageData(0, 0, base.width, base.height);
     let ink = 0;
     for (let i = 0; i < data.length; i += 4) {
-      // Background is opaque white; count anything meaningfully darker.
-      if (data[i]! < 240 || data[i + 1]! < 240 || data[i + 2]! < 240) ink++;
+      if (data[i] !== background.r || data[i + 1] !== background.g || data[i + 2] !== background.b) {
+        ink++;
+      }
     }
     return ink;
   }

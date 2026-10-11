@@ -1,8 +1,11 @@
-import { StrictMode, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
+import { DEFAULT_PALETTE, normalizeHex, readableTextOn } from "./canvas/color";
 import { Engine } from "./canvas/engine";
 import type { ToolId } from "./canvas/record";
 import "./styles.css";
+
+type Slot = "foreground" | "background";
 
 const TOOLS: { id: ToolId; key: string }[] = [
   { id: "pencil", key: "1" },
@@ -11,6 +14,21 @@ const TOOLS: { id: ToolId; key: string }[] = [
   { id: "rect", key: "4" },
   { id: "ellipse", key: "5" },
 ];
+
+const RECENTS_KEY = "paintpad.recents";
+
+function loadRecents(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === "string" && normalizeHex(v) === v);
+  } catch {
+    // A corrupt or unavailable store must never stop the editor from loading.
+    return [];
+  }
+}
 
 /**
  * Minimal dev harness for the render engine. Deliberately unstyled — this slice is about
@@ -23,6 +41,11 @@ function App() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+
+  const [slot, setSlot] = useState<Slot>("foreground");
+  const [recents, setRecents] = useState<string[]>(loadRecents);
+  const [hexDraft, setHexDraft] = useState("");
+  const [hexError, setHexError] = useState(false);
 
   const settings = useSyncExternalStore(
     (onChange) => engine.subscribe(() => onChange()),
@@ -51,11 +74,46 @@ function App() {
     };
   }, [engine]);
 
+  const activeColour = slot === "foreground" ? settings.foreground : settings.background;
+
+  const applyColour = useCallback(
+    (colour: string) => {
+      const normalised = normalizeHex(colour);
+      if (!normalised) return false;
+      if (slot === "foreground") engine.setForeground(normalised);
+      else engine.setBackground(normalised);
+
+      setRecents((previous) => {
+        const next = [normalised, ...previous.filter((c) => c !== normalised)].slice(0, 12);
+        try {
+          localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+        } catch {
+          // Recents are a convenience; a full or blocked store is not worth surfacing.
+        }
+        return next;
+      });
+      return true;
+    },
+    [engine, slot],
+  );
+
+  const hexInputRef = useRef<HTMLInputElement>(null);
+
+  const commitHex = useCallback(() => {
+    const ok = applyColour(hexDraft);
+    setHexError(!ok);
+    if (ok) {
+      setHexDraft("");
+      // Release focus once the colour is applied. Leaving the field focused means the next
+      // keystroke is typed into it — so `x` would type a letter instead of swapping colours.
+      hexInputRef.current?.blur();
+    }
+  }, [applyColour, hexDraft]);
+
   return (
     <div className="app">
       <header className="bar">
         <span className="brand">PaintPad</span>
-        <span className="hint">render-engine harness</span>
 
         <div className="group" role="group" aria-label="Tool">
           {TOOLS.map((tool) => (
@@ -69,17 +127,6 @@ function App() {
           ))}
         </div>
 
-        <button
-          type="button"
-          aria-pressed={settings.fillShapes}
-          data-fill="toggle"
-          onClick={() => engine.setFillShapes(!settings.fillShapes)}
-          title="Fill shapes with the foreground colour"
-          disabled={settings.tool === "pencil" || settings.tool === "eraser"}
-        >
-          Fill
-        </button>
-
         <label className="group">
           Size {settings.width}px
           <input
@@ -90,6 +137,17 @@ function App() {
             onChange={(e) => engine.setWidth(Number(e.target.value))}
           />
         </label>
+
+        <button
+          type="button"
+          aria-pressed={settings.fillShapes}
+          data-fill="toggle"
+          onClick={() => engine.setFillShapes(!settings.fillShapes)}
+          title="Fill shapes with the foreground colour"
+          disabled={settings.tool === "pencil" || settings.tool === "eraser"}
+        >
+          Fill
+        </button>
 
         <div className="group">
           <button
@@ -134,14 +192,132 @@ function App() {
         <canvas ref={canvasRef} className="surface" aria-label="Drawing canvas" />
       </div>
 
+      <div className="colourbar">
+        <div className="swatches">
+          <Swatch
+            colour={settings.foreground}
+            label="Primary"
+            active={slot === "foreground"}
+            onSelect={() => setSlot("foreground")}
+            testId="swatch-foreground"
+          />
+          <Swatch
+            colour={settings.background}
+            label="Secondary"
+            active={slot === "background"}
+            onSelect={() => setSlot("background")}
+            testId="swatch-background"
+          />
+          <button
+            type="button"
+            className="swap"
+            onClick={() => engine.swapColors()}
+            title="Swap colours (X)"
+          >
+            ⇄
+          </button>
+        </div>
+
+        <div className="palette" role="group" aria-label="Palette">
+          {DEFAULT_PALETTE.map((colour) => (
+            <button
+              key={colour}
+              type="button"
+              className="chip"
+              style={{ background: colour }}
+              data-colour={colour}
+              aria-label={colour}
+              title={colour}
+              onClick={() => applyColour(colour)}
+            />
+          ))}
+        </div>
+
+        {recents.length > 0 && (
+          <div className="palette recents" role="group" aria-label="Recent colours">
+            {recents.map((colour) => (
+              <button
+                key={colour}
+                type="button"
+                className="chip small"
+                style={{ background: colour }}
+                data-recent={colour}
+                aria-label={`recent ${colour}`}
+                onClick={() => applyColour(colour)}
+              />
+            ))}
+          </div>
+        )}
+
+        <div className="hex">
+          <input
+            type="color"
+            aria-label="Custom colour"
+            data-testid="colour-input"
+            value={activeColour}
+            onChange={(e) => applyColour(e.target.value)}
+          />
+          <input
+            type="text"
+            ref={hexInputRef}
+            className={hexError ? "invalid" : ""}
+            data-testid="hex-input"
+            placeholder="#rrggbb"
+            aria-label="Hex colour"
+            aria-invalid={hexError}
+            value={hexDraft}
+            onChange={(e) => {
+              setHexDraft(e.target.value);
+              setHexError(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitHex();
+            }}
+          />
+          <button type="button" onClick={commitHex} disabled={hexDraft.trim() === ""}>
+            Set
+          </button>
+        </div>
+      </div>
+
       <footer className="bar foot">
         <span>Drag to draw · wheel to zoom · space-drag or middle-drag to pan</span>
         <span>
           {settings.tool} · {settings.width}px · {Math.round(settings.viewport.zoom * 100)}% ·{" "}
-          {settings.recordCount} stroke{settings.recordCount === 1 ? "" : "s"}
+          {settings.recordCount} op{settings.recordCount === 1 ? "" : "s"}
         </span>
       </footer>
     </div>
+  );
+}
+
+function Swatch({
+  colour,
+  label,
+  active,
+  onSelect,
+  testId,
+}: {
+  colour: string;
+  label: string;
+  active: boolean;
+  onSelect: () => void;
+  testId: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="swatch"
+      style={{ background: colour, color: readableTextOn(colour) }}
+      aria-pressed={active}
+      aria-label={label}
+      title={`${label} ${colour}`}
+      data-testid={testId}
+      onClick={onSelect}
+    >
+      <span>{label}</span>
+      <code>{colour}</code>
+    </button>
   );
 }
 

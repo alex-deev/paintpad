@@ -23,14 +23,13 @@ async function drawOnFreshPage(
   await page.goto("/");
   await expect(page.locator("canvas.surface")).toBeVisible();
 
-  // Fit, then draw an identical path in CSS pixels. CSS layout is DPR-independent, so the
-  // same coordinates must land on the same document pixels at every scale.
-  await page.getByRole("button", { name: "1:1" }).click();
+  // Deliberately NOT forcing 1:1. At fit zoom the canvas sits entirely inside the stage, so
+  // every coordinate is hit-testable. Zoom is DPR-independent either way.
   await page.locator('input[type="range"]').fill("6");
 
   const box = (await page.locator("canvas.surface").boundingBox())!;
-  const from = { x: 60, y: 60 };
-  const to = { x: 420, y: 320 };
+  const from = { x: 40, y: 40 };
+  const to = { x: 340, y: 220 };
 
   await page.mouse.move(box.x + from.x, box.y + from.y);
   await page.mouse.down();
@@ -63,10 +62,9 @@ async function inkCount(page: Page): Promise<number> {
 test("document pixels are identical at deviceScaleFactor 1, 2 and 3", async ({ browser }) => {
   const results = await Promise.all(SCALES.map((scale) => drawOnFreshPage(browser, scale)));
 
-  // The view canvas is display-scaled by DPR...
-  expect(results[0]!.viewWidth).toBe(1280);
-  expect(results[1]!.viewWidth).toBe(2560);
-  expect(results[2]!.viewWidth).toBe(3840);
+  // The view canvas is display-scaled by DPR, in exact proportion...
+  expect(results[1]!.viewWidth).toBe(results[0]!.viewWidth * 2);
+  expect(results[2]!.viewWidth).toBe(results[0]!.viewWidth * 3);
 
   // ...but the committed document must be bit-for-bit the same at every scale.
   expect(results[1]!.document).toBe(results[0]!.document);
