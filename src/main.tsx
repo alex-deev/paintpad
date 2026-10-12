@@ -65,8 +65,11 @@ function App() {
     });
     observer.observe(stage);
 
-    // Expose for Playwright goldens and manual poking.
-    (window as unknown as { __paintpad: Engine }).__paintpad = engine;
+    // Expose for Playwright goldens and manual poking. Gated so a shipped build does not
+    // leak internals; the e2e suite runs against the dev server, where this is true.
+    if (import.meta.env.DEV) {
+      (window as unknown as { __paintpad: Engine }).__paintpad = engine;
+    }
 
     return () => {
       observer.disconnect();
@@ -186,6 +189,14 @@ function App() {
           </button>
           <button type="button" onClick={() => engine.reset()}>
             Clear
+          </button>
+          <button
+            type="button"
+            data-testid="export"
+            onClick={() => void handleExport(engine)}
+            title="Download the document as a PNG, at the document's own resolution"
+          >
+            Export
           </button>
         </div>
       </header>
@@ -337,6 +348,27 @@ function Swatch({
       <code>{colour ?? "none"}</code>
     </button>
   );
+}
+
+/**
+ * Download the document as a PNG.
+ *
+ * The engine owns compositing (background beneath artwork, at the document's raster size);
+ * the anchor plumbing belongs here. The object URL is revoked immediately after the click —
+ * revoking it synchronously can race the download in some browsers, so it is deferred.
+ */
+async function handleExport(engine: Engine): Promise<void> {
+  const blob = await engine.exportBlob();
+  if (!blob) return;
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = engine.exportFilename();
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function ToolButton({

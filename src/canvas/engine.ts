@@ -926,13 +926,15 @@ export class Engine {
   };
 
   /**
-   * Debug/e2e affordance: the committed document as a PNG data URL.
+   * Composite the document — background beneath artwork — into a scratch canvas at the
+   * document's own raster size.
    *
-   * Composited into a scratch canvas so exports carry the background, at the document's
-   * raster size rather than the view's — reading the view canvas would bake the current zoom
-   * and devicePixelRatio into the export.
+   * This is the single source of truth for "what the document looks like". Exports and
+   * snapshots both go through here so they cannot drift apart. Crucially this is NOT the
+   * view canvas: the view carries the current zoom and devicePixelRatio, so exporting it
+   * would silently ship a low-resolution file.
    */
-  snapshotDataUrl(): string | null {
+  renderDocument(): HTMLCanvasElement | null {
     const base = this.base;
     if (!base) return null;
 
@@ -947,7 +949,36 @@ export class Engine {
       ctx.fillRect(0, 0, scratch.width, scratch.height);
     }
     ctx.drawImage(base, 0, 0);
-    return scratch.toDataURL("image/png");
+    return scratch;
+  }
+
+  /** Debug/e2e affordance: the committed document as a PNG data URL. */
+  snapshotDataUrl(): string | null {
+    return this.renderDocument()?.toDataURL("image/png") ?? null;
+  }
+
+  /**
+   * The document as a PNG blob.
+   *
+   * A blob rather than a data URL: `toDataURL` base64-encodes roughly 15 MB of pixels into
+   * a single string on the main thread, which is a visible stall on a large document.
+   */
+  exportBlob(): Promise<Blob | null> {
+    const scratch = this.renderDocument();
+    if (!scratch) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      scratch.toBlob((blob) => resolve(blob), "image/png");
+    });
+  }
+
+  /** Suggested filename for an export: `paintpad-<YYYYMMDD-HHMMSS>.png`. */
+  exportFilename(): string {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    return `paintpad-${stamp}.png`;
   }
 
   /** Debug/e2e affordance: committed record count. */
