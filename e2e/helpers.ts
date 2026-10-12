@@ -19,6 +19,7 @@ declare global {
         canUndo: boolean;
         canRedo: boolean;
         recordCount: number;
+        hasSelection: boolean;
       };
       undo(): void;
       redo(): void;

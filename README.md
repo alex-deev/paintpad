@@ -39,7 +39,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 
 | | |
 |---|---|
-| Tools | `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse · `6` bucket |
+| Tools | `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse · `6` bucket · `7` select |
 | Size | `[` / `]`, or the slider |
 | Colours | Palette, native picker, or a hex value. Click a swatch to target it, `X` or ⇄ to swap |
 | Undo / redo | `Ctrl+Z` · `Ctrl+Shift+Z` or `Ctrl+Y` |
@@ -88,6 +88,9 @@ rejected.
 
 ## Known limitations
 
+- **Deletes a rectangle; there is no move or paste yet.** Deleting clears a rect back to
+  transparency and commits it as a record. Cutting a region out of the middle of a stroke and
+  dropping it elsewhere is not built — that is the case the record model has to prove next.
 - **Fills reach the wall of a freehand line.** Freehand strokes are antialiased, so the edge
   between the fill and the line is a ramp of partial-alpha pixels, and an exact colour match
   stops short of it. The fill absorbs that ramp, recolouring each pixel by its own coverage,

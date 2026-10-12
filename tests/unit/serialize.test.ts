@@ -76,6 +76,17 @@ describe("encode/decode — round trip", () => {
     expect(restored.entries).toHaveLength(3);
     expect(restored.cursor).toBe(1);
   });
+
+  it("keeps every known record kind", () => {
+    // The guard that makes adding a record kind safe. `decode` drops anything whose `kind` it
+    // does not recognise, which is how a working feature silently vanishes on reload: the
+    // clearRect record was missing from RECORD_KINDS and every selection deletion was lost.
+    const clearRect: PaintRecord = { kind: "clearRect", rect: { x: 10, y: 20, width: 30, height: 40 } };
+    const every: PaintRecord[] = [stroke, shape, fill, clearRect];
+
+    const restored = decode(encode(save({ entries: every, cursor: every.length })))!;
+    expect(restored.entries).toEqual(every);
+  });
 });
 
 describe("decode — rejects unusable input", () => {

@@ -16,6 +16,7 @@ const TOOLS: { id: ToolId; key: string }[] = [
   { id: "rect", key: "4" },
   { id: "ellipse", key: "5" },
   { id: "fill", key: "6" },
+  { id: "select", key: "7" },
 ];
 
 const RECENTS_KEY = "paintpad.recents";

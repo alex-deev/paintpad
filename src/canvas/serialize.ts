@@ -31,7 +31,15 @@ export interface SavedDocument {
   readonly cursor: number;
 }
 
-const RECORD_KINDS = ["stroke", "shape", "fill"] as const;
+/**
+ * Every record kind `decode` will keep.
+ *
+ * Anything not listed is DROPPED, silently — a deliberate choice so a malformed save cannot
+ * crash replay, but it means adding a record kind requires adding it here too. Miss that and
+ * the new kind vanishes on reload while working perfectly in the session. The
+ * "keeps every known record kind" test below exists to make that failure loud.
+ */
+const RECORD_KINDS = ["stroke", "shape", "fill", "clearRect"] as const;
 
 function isRecordKind(value: unknown): boolean {
   return typeof value === "string" && (RECORD_KINDS as readonly string[]).includes(value);

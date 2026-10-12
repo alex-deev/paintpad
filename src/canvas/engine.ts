@@ -36,6 +36,7 @@ import {
   type StrokeRecord,
   type ToolId,
 } from "./record";
+import { isEmptyRect, normalizeRect, type Rect } from "./selection";
 import { SAVE_VERSION, type SavedDocument } from "./serialize";
 import { isDegenerate, normalizeShape, type ShapeKind } from "./shape";
 import type { Pt } from "./stroke";
@@ -111,6 +112,8 @@ export interface EngineSettings {
   readonly recordCount: number;
   readonly fillShapes: boolean;
   readonly fillContiguous: boolean;
+  /** Whether a selection exists, so the UI can enable Delete. */
+  readonly hasSelection: boolean;
 }
 
 export class Engine {
@@ -149,6 +152,7 @@ export class Engine {
     recordCount: 0,
     fillShapes: false,
     fillContiguous: true,
+    hasSelection: false,
   };
   private activePointerId: number | null = null;
   private panPointerId: number | null = null;
@@ -156,6 +160,11 @@ export class Engine {
   private spaceHeld = false;
   private current: PaintRecord | null = null;
   private anchor: Pt | null = null;
+  /** The active selection in integer raster pixels. View state, never a record. */
+  private selection: Rect | null = null;
+  private selectAnchor: Pt | null = null;
+  /** Distinguishes a real drag from a click that happened not to move. */
+  private selectDragged = false;
   private constrain = false;
   private fillShapes = false;
   private fillContiguous = true;
@@ -341,6 +350,7 @@ export class Engine {
       recordCount: this.history.entries.length,
       fillShapes: this.fillShapes,
       fillContiguous: this.fillContiguous,
+      hasSelection: this.selection !== null,
     };
   }
 
@@ -352,9 +362,41 @@ export class Engine {
 
   setTool(tool: ToolId): void {
     if (this.tool === tool) return;
+    const leavingSelect = this.tool === "select" && tool !== "select";
     this.tool = tool;
+    // A live selection with the select tool switched away would let Delete erase something
+    // the user can no longer see. Drop it instead.
+    if (leavingSelect) this.clearSelection();
     this.emit();
     this.applyCursor();
+  }
+
+  /** Discard the selection without touching the document. */
+  clearSelection(): void {
+    if (this.selection === null) return;
+    this.selection = null;
+    this.paintOverlay();
+    this.requestRender();
+    this.emit();
+  }
+
+  /** The active selection, or null. */
+  getSelection(): Rect | null {
+    return this.selection;
+  }
+
+  /**
+   * Erase the selected region.
+   *
+   * Commits a `clearRect` record, so undo needs no special case and autosave persists it like
+   * any other mark. The selection stays active afterwards: Paint keeps it so a second Delete
+   * still works and undo leaves you where you were.
+   */
+  deleteSelection(): void {
+    const rect = this.selection;
+    if (rect === null || isEmptyRect(rect)) return;
+    this.commit({ kind: "clearRect", rect });
+    this.requestRender();
   }
 
   setWidth(width: number): void {
@@ -545,6 +587,7 @@ export class Engine {
       if (this.current && !isEraseInProgress(this.current)) {
         renderRecord(ctx, this.current, this.doc.rasterScale);
       }
+      this.paintMarquee(ctx);
     } finally {
       ctx.restore();
     }
@@ -662,6 +705,39 @@ export class Engine {
    * produces document pixels from records — undo, redo, branching, and `loadRecords` all
    * go through here, so live drawing and replay can never drift apart.
    */
+  /**
+   * Draw the selection marquee on the overlay, in raster coordinates like everything else
+   * there.
+   *
+   * Two offset dashed passes rather than one: a single dash colour vanishes against artwork of
+   * the same colour, which is exactly what the user is selecting.
+   */
+  private paintMarquee(ctx: CanvasRenderingContext2D): void {
+    const rect = this.selection;
+    if (rect === null || this.tool !== "select" || isEmptyRect(rect)) return;
+
+    const scale = this.doc.rasterScale;
+    // Inset by half a raster pixel so the stroke sits inside the rect rather than over it.
+    const inset = 0.5;
+    ctx.lineWidth = Math.max(1, Math.round(scale));
+    ctx.setLineDash([4 * scale, 4 * scale]);
+
+    for (const [colour, offset] of [
+      ["#ffffff", 0],
+      ["#000000", 4 * scale],
+    ] as const) {
+      ctx.strokeStyle = colour;
+      ctx.lineDashOffset = offset;
+      ctx.strokeRect(
+        rect.x + inset,
+        rect.y + inset,
+        Math.max(0, rect.width - 1),
+        Math.max(0, rect.height - 1),
+      );
+    }
+    ctx.setLineDash([]);
+  }
+
   private repaintBase(): void {
     const ctx = this.baseCtx;
     const base = this.base;
@@ -758,6 +834,14 @@ export class Engine {
     const point = this.toRaster(event);
     if (!point) return;
 
+    // The selection tool draws no record at all: the marquee is view state, and only Delete
+    // turns it into one.
+    if (this.tool === "select") {
+      this.selectAnchor = point;
+      this.selectDragged = false;
+      return;
+    }
+
     // The bucket acts on release, not press. Filling on press would mutate the base raster
     // before its record is committed, breaking the invariant that the canvas is always
     // derived from history.
@@ -804,6 +888,17 @@ export class Engine {
   }
 
   private extendGesture(event: PointerEvent): void {
+    if (this.tool === "select") {
+      if (!this.selectAnchor) return;
+      const point = this.toRaster(event);
+      if (!point) return;
+      this.selection = normalizeRect(this.selectAnchor, point);
+      this.selectDragged = true;
+      this.paintOverlay();
+      this.requestRender();
+      return;
+    }
+
     const active = this.current;
     if (!active) return;
 
@@ -832,6 +927,16 @@ export class Engine {
   }
 
   private endGesture(): void {
+    if (this.tool === "select") {
+      // A click that never moved is a deselect, not a one-pixel selection.
+      if (!this.selectDragged) this.selection = null;
+      this.selectAnchor = null;
+      this.paintOverlay();
+      this.requestRender();
+      this.emit();
+      return;
+    }
+
     // The bucket computes and commits here, on release.
     if (CLICK_TOOLS.has(this.tool)) {
       const seed = this.anchor;
@@ -991,6 +1096,13 @@ export class Engine {
     if (event.key === "3") this.setTool("line");
     if (event.key === "4") this.setTool("rect");
     if (event.key === "5") this.setTool("ellipse");
+    if (event.key === "6") this.setTool("fill");
+    if (event.key === "7") this.setTool("select");
+    if (event.key === "Delete" || event.key === "Backspace") {
+      this.deleteSelection();
+      event.preventDefault();
+      return;
+    }
     if (event.key === "[") this.setWidth(this.width - 1);
     if (event.key === "]") this.setWidth(this.width + 1);
     if (event.key === "x" || event.key === "X") this.swapColors();

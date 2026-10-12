@@ -11,6 +11,7 @@ import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth } from "./document";
 import { floodFill } from "./floodfill";
 import { isDegenerate, shapeBounds, type ShapeKind } from "./shape";
+import type { Rect } from "./selection";
 import { strokeToOps, type DrawOp, type Pt } from "./stroke";
 
 /**
@@ -22,7 +23,7 @@ import { strokeToOps, type DrawOp, type Pt } from "./stroke";
  */
 const FILL_TOLERANCE = 0;
 
-export type ToolId = "pencil" | "eraser" | "line" | "rect" | "ellipse" | "fill";
+export type ToolId = "pencil" | "eraser" | "line" | "rect" | "ellipse" | "fill" | "select";
 
 /** Tools that accumulate freehand input points rather than dragging an anchor. */
 export const FREEHAND_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["pencil", "eraser"]);
@@ -75,11 +76,26 @@ export interface FillRecord {
   readonly contiguous: boolean;
 }
 
+/**
+ * Clear a rectangle back to transparency.
+ *
+ * The first record that is a pixel operation rather than a draw. It is still a *parameter*,
+ * which is the whole point: storing the removed `ImageData` would look simpler but
+ * `JSON.stringify` destroys it, so any autosaved document containing one would be corrupt.
+ * Replaying a rect against the base reproduces the same pixels exactly, at integer
+ * coordinates, with no anti-aliasing to reason about.
+ */
+export interface ClearRectRecord {
+  readonly kind: "clearRect";
+  /** Integer raster coordinates. */
+  readonly rect: Rect;
+}
+
 /** The union of everything that can appear in history.
  *
  *  Named `PaintRecord` rather than `Record` so it never shadows TypeScript's built-in
  *  `Record<K, V>` utility type in this module's consumers. */
-export type PaintRecord = StrokeRecord | ShapeRecord | FillRecord;
+export type PaintRecord = StrokeRecord | ShapeRecord | FillRecord | ClearRectRecord;
 
 export interface ShapeRecord {
   readonly kind: "shape";
@@ -189,7 +205,29 @@ export function applyRecord(
     applyFill(ctx, record);
     return;
   }
+  if (record.kind === "clearRect") {
+    applyClearRect(ctx, record);
+    return;
+  }
   renderRecord(ctx, record, rasterScale);
+}
+
+/**
+ * Clear a rect on the base.
+ *
+ * The identity transform is set defensively. `clearRect` is subject to the current matrix, so
+ * a leftover scale would clear only a fraction of the rect — which is the ghost-pixel bug from
+ * the render engine, and the reason this is not just a bare `clearRect` call.
+ */
+function applyClearRect(ctx: CanvasRenderingContext2D, record: ClearRectRecord): void {
+  const { rect } = record;
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(rect.x, rect.y, rect.width, rect.height);
+  } finally {
+    ctx.restore();
+  }
 }
 
 /**
@@ -240,7 +278,8 @@ export function renderRecord(
       renderShape(ctx, record, rasterScale);
       return;
     }
-    if (record.kind === "fill") return; // pixels, not paths — use applyRecord
+    // Pixels, not paths — these go through applyRecord instead.
+    if (record.kind === "fill" || record.kind === "clearRect") return;
     const ops = strokeToOps(record.points, record.width);
     if (ops.length === 0) return;
 
