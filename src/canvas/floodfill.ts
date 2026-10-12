@@ -127,12 +127,19 @@ function absorbPenumbra(
 ): number {
   const queue: number[] = [];
 
-  // Seed from the fill's boundary: every partial-alpha pixel touching a filled pixel. This
-  // needs one raster-sized pass, which is the same order as the fill itself and is bounded
-  // by the getImageData the caller already did.
-  for (let y = 0; y < height; y++) {
+  // Seed from the fill's boundary: every partial-alpha pixel touching a filled pixel. A seed
+  // must be 4-adjacent to a filled pixel, and all filled pixels lie inside `box`, so the
+  // candidates are confined to `box` expanded by one — scanning the whole raster would make
+  // a small fill on a large canvas cost a full-canvas pass for nothing. The BFS below then
+  // carries on outward past this region on its own.
+  const minX = Math.max(0, box.minX - 1);
+  const maxX = Math.min(width - 1, box.maxX + 1);
+  const minY = Math.max(0, box.minY - 1);
+  const maxY = Math.min(height - 1, box.maxY + 1);
+
+  for (let y = minY; y <= maxY; y++) {
     const rowStart = y * width;
-    for (let x = 0; x < width; x++) {
+    for (let x = minX; x <= maxX; x++) {
       const index = rowStart + x;
       if (mask[index] !== UNTOUCHED) continue;
       const alpha = data[index * 4 + 3]!;
