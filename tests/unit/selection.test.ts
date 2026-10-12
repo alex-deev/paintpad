@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isEmptyRect, normalizeRect, type Rect } from "../../src/canvas/selection";
+import {
+  isEmptyRect,
+  normalizeRect,
+  rectContains,
+  rectsIntersect,
+  unionRect,
+  type Rect,
+} from "../../src/canvas/selection";
 
 /**
  * Selection geometry — pure and DOM-free, so it runs under `environment: "node"` like every
@@ -143,5 +150,64 @@ describe("isEmptyRect", () => {
 
   it("rejects the zero-length click rect", () => {
     expect(isEmptyRect(normalizeRect({ x: 40, y: 40 }, { x: 40, y: 40 }))).toBe(true);
+  });
+});
+
+describe("rectContains — decides move versus new selection", () => {
+  const rect: Rect = { x: 10, y: 20, width: 100, height: 50 };
+
+  it("accepts points strictly inside", () => {
+    expect(rectContains(rect, { x: 50, y: 40 })).toBe(true);
+  });
+
+  it("includes the top-left corner and excludes the bottom-right", () => {
+    // Half-open, so a point on the far edge belongs to whatever is next, not to this rect.
+    expect(rectContains(rect, { x: 10, y: 20 })).toBe(true);
+    expect(rectContains(rect, { x: 109, y: 69 })).toBe(true);
+    expect(rectContains(rect, { x: 110, y: 70 })).toBe(false);
+  });
+
+  it("excludes points outside on every side", () => {
+    expect(rectContains(rect, { x: 9, y: 40 })).toBe(false);
+    expect(rectContains(rect, { x: 50, y: 19 })).toBe(false);
+    expect(rectContains(rect, { x: 50, y: 70 })).toBe(false);
+  });
+});
+
+describe("rectsIntersect — bounds filtering for a move", () => {
+  const rect: Rect = { x: 0, y: 0, width: 10, height: 10 };
+
+  it("is true for genuine overlap", () => {
+    expect(rectsIntersect(rect, { x: 5, y: 5, width: 10, height: 10 })).toBe(true);
+    expect(rectsIntersect(rect, { x: 2, y: 2, width: 2, height: 2 })).toBe(true);
+  });
+
+  it("is true when one rect contains the other", () => {
+    expect(rectsIntersect(rect, { x: 1, y: 1, width: 1, height: 1 })).toBe(true);
+    expect(rectsIntersect({ x: 1, y: 1, width: 1, height: 1 }, rect)).toBe(true);
+  });
+
+  it("is false for touching edges, which share no pixels", () => {
+    expect(rectsIntersect(rect, { x: 10, y: 0, width: 10, height: 10 })).toBe(false);
+    expect(rectsIntersect(rect, { x: 0, y: 10, width: 10, height: 10 })).toBe(false);
+  });
+
+  it("is false when separated", () => {
+    expect(rectsIntersect(rect, { x: 50, y: 50, width: 10, height: 10 })).toBe(false);
+  });
+});
+
+describe("unionRect", () => {
+  it("returns the containing rect", () => {
+    expect(
+      unionRect({ x: 0, y: 0, width: 10, height: 10 }, { x: 20, y: 30, width: 10, height: 10 }),
+    ).toEqual({ x: 0, y: 0, width: 30, height: 40 });
+  });
+
+  it("is order-independent and idempotent", () => {
+    const a: Rect = { x: -5, y: 2, width: 10, height: 10 };
+    const b: Rect = { x: 3, y: 2, width: 10, height: 10 };
+    expect(unionRect(a, b)).toEqual(unionRect(b, a));
+    expect(unionRect(a, a)).toEqual(a);
   });
 });

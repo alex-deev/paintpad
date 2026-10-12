@@ -42,3 +42,34 @@ export function normalizeRect(a: Pt, b: Pt): Rect {
 export function isEmptyRect(rect: Rect): boolean {
   return rect.width <= 0 || rect.height <= 0;
 }
+
+/** True when the point lies inside the rect. Drives move-versus-new-selection. */
+export function rectContains(rect: Rect, point: Pt): boolean {
+  return (
+    point.x >= rect.x &&
+    point.x < rect.x + rect.width &&
+    point.y >= rect.y &&
+    point.y < rect.y + rect.height
+  );
+}
+
+/**
+ * True when two rects overlap.
+ *
+ * Touching edges do NOT count. Adjacent but non-overlapping rects share no pixels, and
+ * treating them as intersecting would drag unrelated records into a move.
+ */
+export function rectsIntersect(a: Rect, b: Rect): boolean {
+  return (
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+  );
+}
+
+/** The smallest rect containing both inputs. */
+export function unionRect(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.width, b.x + b.width);
+  const bottom = Math.max(a.y + a.height, b.y + b.height);
+  return { x, y, width: right - x, height: bottom - y };
+}

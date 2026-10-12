@@ -80,9 +80,20 @@ describe("encode/decode — round trip", () => {
   it("keeps every known record kind", () => {
     // The guard that makes adding a record kind safe. `decode` drops anything whose `kind` it
     // does not recognise, which is how a working feature silently vanishes on reload: the
-    // clearRect record was missing from RECORD_KINDS and every selection deletion was lost.
-    const clearRect: PaintRecord = { kind: "clearRect", rect: { x: 10, y: 20, width: 30, height: 40 } };
-    const every: PaintRecord[] = [stroke, shape, fill, clearRect];
+    // clearRect was missing and every selection deletion was lost on reload; move then
+    // did exactly the same thing again. Twice is the pattern, so this test stays.
+    const clearRect: PaintRecord = {
+      kind: "clearRect",
+      rect: { x: 10, y: 20, width: 30, height: 40 },
+    };
+    const move: PaintRecord = {
+      kind: "move",
+      records: [stroke],
+      dx: 40,
+      dy: 0,
+      clip: { x: 10, y: 20, width: 30, height: 40 },
+    };
+    const every: PaintRecord[] = [stroke, shape, fill, clearRect, move];
 
     const restored = decode(encode(save({ entries: every, cursor: every.length })))!;
     expect(restored.entries).toEqual(every);

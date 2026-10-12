@@ -39,7 +39,7 @@ export interface SavedDocument {
  * the new kind vanishes on reload while working perfectly in the session. The
  * "keeps every known record kind" test below exists to make that failure loud.
  */
-const RECORD_KINDS = ["stroke", "shape", "fill", "clearRect"] as const;
+const RECORD_KINDS = ["stroke", "shape", "fill", "clearRect", "move"] as const;
 
 function isRecordKind(value: unknown): boolean {
   return typeof value === "string" && (RECORD_KINDS as readonly string[]).includes(value);

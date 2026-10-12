@@ -48,6 +48,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 | Constrain | Hold `Shift` — 45° lines, square rectangles, circular ellipses |
 | Transparency | `∅` clears the canvas background |
 | Bucket scope | The toggle beside the tools — `Contiguous` fills the connected region, `Global` every matching pixel |
+| Selection | `7`, then drag a box. Drag **inside** it to move, outside to start a new one. `Delete` erases the contents |
 
 The canvas opens **transparent**. Set a background from the second swatch and the eraser
 restores it; leave it unset and erasing produces real transparency, which PNG export
@@ -88,9 +89,10 @@ rejected.
 
 ## Known limitations
 
-- **Deletes a rectangle; there is no move or paste yet.** Deleting clears a rect back to
-  transparency and commits it as a record. Cutting a region out of the middle of a stroke and
-  dropping it elsewhere is not built — that is the case the record model has to prove next.
+- **Selection moves and deletes, but there is no cut, copy, or paste yet.** A move stores the
+  records that produced the region and replays them at an offset, so history stays
+  JSON-serialisable. Pasting one selection inside another is the case that has to prove the
+  nesting depth is bounded.
 - **Fills reach the wall of a freehand line.** Freehand strokes are antialiased, so the edge
   between the fill and the line is a ramp of partial-alpha pixels, and an exact colour match
   stops short of it. The fill absorbs that ramp, recolouring each pixel by its own coverage,

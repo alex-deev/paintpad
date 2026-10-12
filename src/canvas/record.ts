@@ -11,7 +11,7 @@ import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth } from "./document";
 import { floodFill } from "./floodfill";
 import { isDegenerate, shapeBounds, type ShapeKind } from "./shape";
-import type { Rect } from "./selection";
+import { rectsIntersect, type Rect } from "./selection";
 import { strokeToOps, type DrawOp, type Pt } from "./stroke";
 
 /**
@@ -91,11 +91,40 @@ export interface ClearRectRecord {
   readonly rect: Rect;
 }
 
+/**
+ * Move a rectangular region.
+ *
+ * The second pixel-shaped record, and the one that settles whether the model generalises. It
+ * stores the records that *produced* the region rather than the region's pixels, so history
+ * stays JSON-safe and replay stays a re-derivation rather than a lookup.
+ *
+ * Replay renders the region to a scratch canvas and blits it at an offset. That is not
+ * decoration: `applyFill` goes through `getImageData`/`putImageData`, which are
+ * transform-independent, so a nested fill would ignore a clip-and-translate on the main
+ * context entirely. The scratch canvas *is* the clip, and handles every record kind
+ * uniformly.
+ */
+export interface MoveRecord {
+  readonly kind: "move";
+  /** Records whose rendering within `clip` is carried to the new position. */
+  readonly records: readonly PaintRecord[];
+  /** Offset in raster pixels. Integer, so the blit is 1:1 and lossless. */
+  readonly dx: number;
+  readonly dy: number;
+  /** The source region, in integer raster coordinates. Also the area left behind. */
+  readonly clip: Rect;
+}
+
 /** The union of everything that can appear in history.
  *
  *  Named `PaintRecord` rather than `Record` so it never shadows TypeScript's built-in
  *  `Record<K, V>` utility type in this module's consumers. */
-export type PaintRecord = StrokeRecord | ShapeRecord | FillRecord | ClearRectRecord;
+export type PaintRecord =
+  | StrokeRecord
+  | ShapeRecord
+  | FillRecord
+  | ClearRectRecord
+  | MoveRecord;
 
 export interface ShapeRecord {
   readonly kind: "shape";
@@ -196,6 +225,135 @@ function renderShape(ctx: CanvasRenderingContext2D, record: ShapeRecord, rasterS
  * Strokes and shapes draw; fills read and write pixels, so they need their own path. Routing
  * everything through one entry point keeps the engine from needing to know which is which.
  */
+/**
+ * Reusable scratch surface for move replay.
+ *
+ * Module-level so replaying a long history does not allocate a canvas per move record. Sized
+ * per use; the canvas is transparent by default and explicitly cleared first, because
+ * assigning `width` is the only way to reset it and does not happen when the size matches.
+ */
+/**
+ * The area a record can affect, in integer raster pixels, or null if that is unknown.
+ *
+ * Null means "assume anywhere" and is what keeps a move from silently dropping content. It
+ * applies to fills, whose extent depends on the artwork underneath them and cannot be known
+ * without replaying the document up to that point.
+ */
+export function recordBounds(record: PaintRecord, rasterScale: number): Rect | null {
+  switch (record.kind) {
+    case "clearRect":
+      return record.rect;
+    case "move": {
+      const { clip, dx, dy } = record;
+      return { x: clip.x + dx, y: clip.y + dy, width: clip.width, height: clip.height };
+    }
+    case "shape": {
+      const bounds = shapeBounds({
+        kind: record.shape,
+        from: record.from,
+        to: record.to,
+      });
+      return bounds === null
+        ? null
+        : {
+            x: Math.floor(bounds.x),
+            y: Math.floor(bounds.y),
+            // Grown by the stroke width, which extends past the geometric bounds.
+            width: Math.ceil(bounds.x + bounds.width) + 2,
+            height: Math.ceil(bounds.y + bounds.height) + 2,
+          };
+    }
+    case "stroke": {
+      if (record.points.length === 0) return null;
+      const half = (clampStrokeWidth(record.width) * rasterScale) / 2;
+      let minX = Number.POSITIVE_INFINITY;
+      let minY = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+      for (const point of record.points) {
+        if (point.x < minX) minX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y > maxY) maxY = point.y;
+      }
+      return {
+        x: Math.floor(minX - half),
+        y: Math.floor(minY - half),
+        width: Math.ceil(maxX + half) - Math.floor(minX - half),
+        height: Math.ceil(maxY + half) - Math.floor(minY - half),
+      };
+    }
+    case "fill":
+      return null;
+  }
+}
+
+/**
+ * The records a move of `clip` must carry.
+ *
+ * Bounds filtering is what stops a long session's history growing multiplicatively: without
+ * it every move embeds the entire prior log. Unknown bounds are included, because a region
+ * that silently lost a fill would look like a renderer bug rather than a missed record.
+ */
+export function recordsForMove(
+  records: readonly PaintRecord[],
+  clip: Rect,
+  rasterScale: number,
+): PaintRecord[] {
+  return records.filter((record) => {
+    const bounds = recordBounds(record, rasterScale);
+    return bounds === null || rectsIntersect(bounds, clip);
+  });
+}
+
+let scratch: HTMLCanvasElement | null = null;
+
+function getScratch(width: number, height: number): CanvasRenderingContext2D {
+  if (!scratch) scratch = document.createElement("canvas");
+  if (scratch.width !== width) scratch.width = width;
+  if (scratch.height !== height) scratch.height = height;
+  const ctx = scratch.getContext("2d", { colorSpace: "srgb" });
+  if (!ctx) throw new Error("applyMove: could not acquire a 2D context");
+  ctx.clearRect(0, 0, width, height);
+  return ctx;
+}
+
+/**
+ * Carry the contents of `clip` by `(dx, dy)`.
+ *
+ * Clears the source first, so moving a region off itself leaves nothing behind — consistent
+ * with delete, and with the background being composited beneath the artwork rather than baked
+ * in. Baking the background colour here would reintroduce the frozen-pixel bug.
+ */
+function applyMove(ctx: CanvasRenderingContext2D, record: MoveRecord, rasterScale: number): void {
+  const { clip, dx, dy, records } = record;
+  if (records.length === 0) return;
+
+  const scratchCtx = getScratch(clip.width, clip.height);
+  scratchCtx.save();
+  try {
+    // Draw the nested records at their ORIGINAL coordinates, shifted so the clip's top-left
+    // lands at the origin. Anything outside is cut off by the canvas edge.
+    scratchCtx.setTransform(1, 0, 0, 1, -clip.x, -clip.y);
+    for (const nested of records) applyRecord(scratchCtx, nested, rasterScale);
+  } finally {
+    scratchCtx.restore();
+  }
+
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(clip.x, clip.y, clip.width, clip.height);
+    // Smoothing off: at integer offsets this is a straight pixel copy, and leaving it on
+    // would resample and soften the anti-aliased edge the move was supposed to preserve.
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratch!, clip.x + dx, clip.y + dy);
+    ctx.imageSmoothingEnabled = true;
+  } finally {
+    ctx.restore();
+  }
+}
+
 export function applyRecord(
   ctx: CanvasRenderingContext2D,
   record: PaintRecord,
@@ -207,6 +365,10 @@ export function applyRecord(
   }
   if (record.kind === "clearRect") {
     applyClearRect(ctx, record);
+    return;
+  }
+  if (record.kind === "move") {
+    applyMove(ctx, record, rasterScale);
     return;
   }
   renderRecord(ctx, record, rasterScale);
@@ -279,7 +441,9 @@ export function renderRecord(
       return;
     }
     // Pixels, not paths — these go through applyRecord instead.
-    if (record.kind === "fill" || record.kind === "clearRect") return;
+    if (record.kind === "fill" || record.kind === "clearRect" || record.kind === "move") {
+      return;
+    }
     const ops = strokeToOps(record.points, record.width);
     if (ops.length === 0) return;
 

@@ -30,13 +30,14 @@ import {
   CLICK_TOOLS,
   FREEHAND_TOOLS,
   isShapeTool,
+  recordsForMove,
   renderRecord,
   type PaintRecord,
   type ShapeRecord,
   type StrokeRecord,
   type ToolId,
 } from "./record";
-import { isEmptyRect, normalizeRect, type Rect } from "./selection";
+import { isEmptyRect, normalizeRect, rectContains, type Rect } from "./selection";
 import { SAVE_VERSION, type SavedDocument } from "./serialize";
 import { isDegenerate, normalizeShape, type ShapeKind } from "./shape";
 import type { Pt } from "./stroke";
@@ -165,6 +166,11 @@ export class Engine {
   private selectAnchor: Pt | null = null;
   /** Distinguishes a real drag from a click that happened not to move. */
   private selectDragged = false;
+  /** Set when a gesture started inside the selection, so it moves rather than replaces it. */
+  private movingSelection = false;
+  /** Where a move gesture started, and the region it is carrying. */
+  private moveOrigin: Pt | null = null;
+  private moveClip: Rect | null = null;
   private constrain = false;
   private fillShapes = false;
   private fillContiguous = true;
@@ -835,10 +841,21 @@ export class Engine {
     if (!point) return;
 
     // The selection tool draws no record at all: the marquee is view state, and only Delete
-    // turns it into one.
+    // or a move turns it into one.
     if (this.tool === "select") {
-      this.selectAnchor = point;
-      this.selectDragged = false;
+      const active = this.selection;
+      // Dragging inside the existing selection carries it; dragging outside starts a new one.
+      // Matching Paint, and the only interaction that does not need a mode switch.
+      if (active !== null && rectContains(active, point)) {
+        this.movingSelection = true;
+        this.moveOrigin = point;
+        this.moveClip = active;
+      } else {
+        this.movingSelection = false;
+        this.moveClip = null;
+        this.selectAnchor = point;
+        this.selectDragged = false;
+      }
       return;
     }
 
@@ -889,6 +906,26 @@ export class Engine {
 
   private extendGesture(event: PointerEvent): void {
     if (this.tool === "select") {
+      if (this.movingSelection) {
+        const origin = this.moveOrigin;
+        const clip = this.moveClip;
+        if (!origin || !clip) return;
+        const point = this.toRaster(event);
+        if (!point) return;
+        this.selectDragged = true;
+        // Preview is the outline only. Showing the content would mean mutating the base
+        // mid-gesture, breaking the invariant that the canvas is derived from history — the
+        // same reason flood fill does not preview.
+        this.selection = {
+          x: clip.x + Math.round(point.x - origin.x),
+          y: clip.y + Math.round(point.y - origin.y),
+          width: clip.width,
+          height: clip.height,
+        };
+        this.paintOverlay();
+        this.requestRender();
+        return;
+      }
       if (!this.selectAnchor) return;
       const point = this.toRaster(event);
       if (!point) return;
@@ -928,6 +965,33 @@ export class Engine {
 
   private endGesture(): void {
     if (this.tool === "select") {
+      if (this.movingSelection) {
+        const origin = this.moveOrigin;
+        const clip = this.moveClip;
+        const target = this.selection;
+        this.movingSelection = false;
+        this.moveOrigin = null;
+        this.moveClip = null;
+        // A move that ended where it started is not worth a record.
+        if (origin && clip && target && (target.x !== clip.x || target.y !== clip.y)) {
+          const dx = target.x - clip.x;
+          const dy = target.y - clip.y;
+          this.commit({
+            kind: "move",
+            records: recordsForMove(visibleEntries(this.history), clip, this.doc.rasterScale),
+            dx,
+            dy,
+            clip,
+          });
+        } else {
+          this.selection = clip;
+        }
+        this.paintOverlay();
+        this.requestRender();
+        this.emit();
+        return;
+      }
+
       // A click that never moved is a deselect, not a one-pixel selection.
       if (!this.selectDragged) this.selection = null;
       this.selectAnchor = null;

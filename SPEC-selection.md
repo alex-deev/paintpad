@@ -39,6 +39,59 @@ them translated and clipped — has a foundation worth building on.
 | 7 | Deleting shows the **background** through the hole | Clearing to the background colour — the background is composited, never baked in, so this falls out for free |
 | 8 | `clearRect` sets an identity transform defensively | Trusting the caller — a leftover scale is the ghost-pixel bug from slice 1, and `clearRect` is subject to it |
 
+## Slice 11 — Move
+
+**Added after slice 10 shipped.** The design below replaces the sketch at the bottom of this
+document, which did not survive contact with the renderer.
+
+### The flaw in the original plan
+
+The plan was to store the records that produced the region and re-render them clipped and
+translated on the main context. Two problems, only visible once written down:
+
+- **Nested fills ignore transforms.** `applyFill` uses `getImageData`/`putImageData`, which
+  are transform-independent, so a fill inside a moved region would ignore both the clip and
+  the offset. `applyClearRect` sets an identity transform defensively and would defeat a
+  translate for the same reason.
+- **History grows multiplicatively.** Without bounds filtering, each move embeds the entire
+  prior log, making N moves O(N²) in the autosave.
+
+### The move record
+
+`{kind:"move", records, dx, dy, clip}` — still parameters, still JSON-safe, still replayable.
+
+Replay is **render the region to a scratch canvas, then blit it**:
+
+1. Size a scratch canvas to `clip` and clear it.
+2. Translate by `-clip` so nested records draw at their original coordinates.
+3. Apply every nested record to the scratch canvas.
+4. `drawImage` the scratch at `clip` + `(dx, dy)`, smoothing disabled.
+
+The scratch canvas *is* the clip, which handles any record kind uniformly — a nested fill is
+correct because it runs against its own canvas rather than a transformed one. Blitting at
+integer offsets with smoothing off copies pixels exactly, so anti-aliasing inside the region
+survives the move unchanged.
+
+Nested records are filtered at commit time to those whose bounds intersect `clip`, which is
+what keeps the nesting from growing without bound. A `fill` record's extent is genuinely
+unknown without replaying it, so fills are always included; that is cheap, since a fill record
+is four fields.
+
+### Moving leaves the source transparent
+
+Clearing the source rect and moving the content is consistent with delete: the background is
+composited beneath the artwork and shows through with no special handling. Baking the
+background colour in would reintroduce the frozen-pixel bug fixed in the background slice.
+
+### Interaction
+
+- Dragging **inside** the selection moves it; dragging **outside** starts a new one, matching
+  Paint.
+- The preview is the marquee outline only. A true content preview would need the base mutated
+  during the drag, which breaks the invariant that the canvas is derived from history — the
+  same reason flood fill does not preview.
+- The move commits on release, so a cancelled gesture leaves nothing behind.
+
 ## Boundaries
 
 **Always**
