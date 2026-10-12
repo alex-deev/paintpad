@@ -126,12 +126,35 @@ test("shortcuts stay inert while typing a hex value", async ({ page }) => {
   await input.pressSequentially("abcdef", { delay: 10 });
 
   expect(await input.inputValue()).toBe("abcdef");
-  expect(await colours(page)).toEqual({ foreground: "#ff0000", background: "#ffffff" });
+  // The canvas background defaults to transparent, not to a colour.
+  expect(await colours(page)).toEqual({ foreground: "#ff0000", background: null });
 });
 
-test("the eraser ignores the secondary colour and erases to transparency", async ({ page }) => {
-  // The eraser used to paint colour 2. It now erases to alpha 0, so the secondary colour
-  // no longer influences it at all.
+test("picking a palette colour for the background slot sets the canvas background", async ({ page }) => {
+  // Palette, hex, and native picker all write to whichever slot is active.
+  await pickPalette(page, "#ffd166");
+  await page.getByTestId("swatch-background").click();
+  await pickPalette(page, "#11845b");
+  expect(await colours(page)).toEqual({ foreground: "#ffd166", background: "#11845b" });
+
+  // Switching slots back leaves the background alone.
+  await page.getByTestId("swatch-foreground").click();
+  await pickPalette(page, "#f72585");
+  expect(await colours(page)).toEqual({ foreground: "#f72585", background: "#11845b" });
+});
+
+test("invalid hex leaves the canvas background untouched", async ({ page }) => {
+  await page.getByTestId("swatch-background").click();
+  await pickPalette(page, "#11845b");
+
+  await setHex(page, "not-a-colour");
+  expect((await colours(page)).background).toBe("#11845b");
+  await expect(page.getByTestId("hex-input")).toHaveAttribute("aria-invalid", "true");
+});
+
+test("the eraser restores the canvas background it was drawn over", async ({ page }) => {
+  // Colour 2 is now the canvas background, so the eraser restores it. With no background
+  // set, erasing still goes to true transparency — covered in background.spec.ts.
   await setWidth(page, 10);
   await pickPalette(page, "#000000");
   await drawStroke(page, { x: 60, y: 150 }, { x: 380, y: 150 }, { steps: 20 });
@@ -147,25 +170,25 @@ test("the eraser ignores the secondary colour and erases to transparency", async
     const ctx = canvas.getContext("2d")!;
     const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const near = (a: number, b: number) => Math.abs(a - b) < 45;
-    let green = 0;
-    let white = 0;
+    let background = 0;
     let transparent = 0;
+    let dark = 0;
     for (let i = 0; i < data.length; i += 4) {
       if (data[i + 3] === 0) transparent++;
-      else if (near(data[i]!, 0x1b) && near(data[i + 1]!, 0x9e) && near(data[i + 2]!, 0x77)) green++;
-      else if (near(data[i]!, 255) && near(data[i + 1]!, 255) && near(data[i + 2]!, 255)) white++;
+      else if (near(data[i]!, 0x1b) && near(data[i + 1]!, 0x9e) && near(data[i + 2]!, 0x77)) background++;
+      else if (data[i]! < 90) dark++;
     }
-    return { green, white, transparent };
+    return { background, transparent, dark };
   });
 
-  // Neither the eraser colour nor white appears — the gap is genuinely transparent.
-  expect(counts.green).toBe(0);
-  expect(counts.white).toBe(0);
-  expect(counts.transparent).toBeGreaterThan(1000);
+  expect(counts.background).toBeGreaterThan(1000);
+  expect(counts.transparent).toBe(0);
+  expect(counts.dark).toBeGreaterThan(1000);
 });
 
-test("the secondary colour does not tint the document", async ({ page }) => {
-  // Colour 2 is a second painting colour, not a canvas background. The document has none.
+test("Clear leaves a blank canvas showing the background colour", async ({ page }) => {
+  // Clear means "blank canvas", and a blank canvas with a background set IS that colour —
+  // the same way Paint's white canvas survives Clear.
   await setWidth(page, 12);
   await pickPalette(page, "#000000");
   await drawStroke(page, { x: 60, y: 60 }, { x: 360, y: 260 }, { steps: 18 });
@@ -174,8 +197,9 @@ test("the secondary colour does not tint the document", async ({ page }) => {
   await page.getByTestId("swatch-background").click();
   await setHex(page, "#3a0ca3");
   await page.getByRole("button", { name: "Clear" }).click();
-  await page.waitForTimeout(100);
+  await page.waitForTimeout(120);
 
+  // No ink, because ink means "differs from the background".
   expect(await ink(page)).toBe(0);
 
   const centre = await page.evaluate(() => {
@@ -184,7 +208,7 @@ test("the secondary colour does not tint the document", async ({ page }) => {
     const [r, g, b, a] = ctx.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
     return { r, g, b, a };
   });
-  expect(centre).toEqual({ r: 0, g: 0, b: 0, a: 0 });
+  expect(centre).toEqual({ r: 0x3a, g: 0x0c, b: 0xa3, a: 255 });
 });
 
 test("drawing and undoing work on a dark background", async ({ page }) => {

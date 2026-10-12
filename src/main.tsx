@@ -74,7 +74,9 @@ function App() {
     };
   }, [engine]);
 
-  const activeColour = slot === "foreground" ? settings.foreground : settings.background;
+  // The native colour input cannot represent "no colour", so a transparent canvas falls
+  // back to white there. The ∅ button is the explicit control for transparency.
+  const activeColour = slot === "foreground" ? settings.foreground : (settings.background ?? "#ffffff");
 
   const applyColour = useCallback(
     (colour: string) => {
@@ -196,14 +198,14 @@ function App() {
         <div className="swatches">
           <Swatch
             colour={settings.foreground}
-            label="Primary"
+            label="Draw"
             active={slot === "foreground"}
             onSelect={() => setSlot("foreground")}
             testId="swatch-foreground"
           />
           <Swatch
             colour={settings.background}
-            label="Secondary"
+            label="Canvas"
             active={slot === "background"}
             onSelect={() => setSlot("background")}
             testId="swatch-background"
@@ -212,9 +214,25 @@ function App() {
             type="button"
             className="swap"
             onClick={() => engine.swapColors()}
-            title="Swap colours (X)"
+            disabled={settings.background === null}
+            title={
+              settings.background === null
+                ? "Set a canvas background to swap"
+                : "Swap draw and canvas colours (X)"
+            }
           >
             ⇄
+          </button>
+          <button
+            type="button"
+            data-testid="background-none"
+            className="none"
+            aria-pressed={settings.background === null}
+            onClick={() => engine.setBackground(null)}
+            title="Transparent background"
+            disabled={settings.background === null}
+          >
+            ∅
           </button>
         </div>
 
@@ -298,7 +316,7 @@ function Swatch({
   onSelect,
   testId,
 }: {
-  colour: string;
+  colour: string | null;
   label: string;
   active: boolean;
   onSelect: () => void;
@@ -307,16 +325,16 @@ function Swatch({
   return (
     <button
       type="button"
-      className="swatch"
-      style={{ background: colour, color: readableTextOn(colour) }}
+      className={`swatch${colour === null ? " transparent" : ""}`}
+      style={colour === null ? undefined : { background: colour, color: readableTextOn(colour) }}
       aria-pressed={active}
       aria-label={label}
-      title={`${label} ${colour}`}
+      title={`${label} ${colour ?? "transparent"}`}
       data-testid={testId}
       onClick={onSelect}
     >
       <span>{label}</span>
-      <code>{colour}</code>
+      <code>{colour ?? "none"}</code>
     </button>
   );
 }

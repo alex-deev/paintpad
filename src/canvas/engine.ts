@@ -13,7 +13,7 @@
  * after commit — a visible pop on pointerup. Compositing ourselves removes the divergence.
  */
 
-import { normalizeHex } from "./color";
+import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
 import {
   canRedo as historyCanRedo,
@@ -48,9 +48,14 @@ import {
 } from "./viewport";
 
 export const DEFAULT_FOREGROUND = "#1f2430";
-/** The secondary painting colour. No longer the document background — the document is
- *  transparent, and the eraser erases to nothing rather than to this. */
-export const DEFAULT_BACKGROUND = "#ffffff";
+/**
+ * The canvas background. `null` means transparent — the default — rather than an opaque
+ * colour, so a new document is genuinely empty and PNG export carries real alpha.
+ *
+ * The eraser restores this: with no background it erases to transparency, and with one set
+ * it paints that colour back, which is what someone means by "background colour".
+ */
+export type CanvasBackground = string | null;
 
 interface StageGeometry {
   readonly rect: DOMRectReadOnly;
@@ -95,7 +100,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
 export interface EngineSettings {
   readonly tool: ToolId;
   readonly foreground: string;
-  readonly background: string;
+  readonly background: CanvasBackground;
   readonly width: number;
   readonly viewport: Viewport;
   readonly canUndo: boolean;
@@ -124,7 +129,7 @@ export class Engine {
   private viewport: Viewport = IDENTITY_VIEWPORT;
   private tool: ToolId = "pencil";
   private foreground = DEFAULT_FOREGROUND;
-  private background = DEFAULT_BACKGROUND;
+  private background: CanvasBackground = null;
   private width = 4;
 
   private stage: StageGeometry | null = null;
@@ -132,7 +137,7 @@ export class Engine {
   private snapshot: EngineSettings = {
     tool: "pencil",
     foreground: DEFAULT_FOREGROUND,
-    background: DEFAULT_BACKGROUND,
+    background: null,
     width: 4,
     viewport: IDENTITY_VIEWPORT,
     canUndo: false,
@@ -364,17 +369,27 @@ export class Engine {
     this.emit();
   }
 
-  /** Set the secondary painting colour. It is a second colour to draw with, not the
-   *  document background and not the eraser — the document is transparent and the eraser
-   *  erases to nothing. */
-  setBackground(color: string): void {
-    const next = normalizeHex(color);
-    if (!next || next === this.background) return;
+  /**
+   * Set the canvas background. Pass `null` for a transparent document.
+   *
+   * This is a document *property*, not a mark: it is deliberately not an undoable operation,
+   * the same way canvas size is not. Undo removes things you drew, not document settings.
+   */
+  setBackground(colour: CanvasBackground): void {
+    const next = colour === null ? null : normalizeHex(colour);
+    if (next === null && colour !== null) return; // invalid input leaves state untouched
+    if (next === this.background) return;
     this.background = next;
+    this.refreshSnapshot();
+    this.repaintBase();
+    this.requestRender();
     this.emit();
   }
 
+  /** Exchange the drawing colour and the canvas background. */
   swapColors(): void {
+    // Swapping a colour with "nothing" is meaningless, so it is a no-op when unset.
+    if (this.background === null) return;
     const previous = this.foreground;
     this.foreground = this.background;
     this.background = previous;
@@ -558,9 +573,17 @@ export class Engine {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      // Transparent, not white: the document has a real alpha channel and "New" means
-      // nothing rather than a sheet of paper.
-      ctx.clearRect(0, 0, base.width, base.height);
+      // The background is filled FIRST, so it always sits beneath every mark. It is a
+      // document property rather than a record, which is why it is applied here instead of
+      // being replayed.
+      if (this.background !== null) {
+        ctx.fillStyle = this.background;
+        ctx.fillRect(0, 0, base.width, base.height);
+      } else {
+        // Transparent, not white: the document has a real alpha channel and "New" means
+        // nothing rather than a sheet of paper.
+        ctx.clearRect(0, 0, base.width, base.height);
+      }
       for (const record of visibleEntries(this.history)) {
         renderRecord(ctx, record, this.doc.rasterScale);
       }
@@ -648,16 +671,15 @@ export class Engine {
       this.anchor = point;
       this.current = this.buildShape(point, point);
     } else {
-      // The eraser is a stroke record with `destination-out`, so it erases to NOTHING
-      // rather than painting a colour over things. Because the additive overlay starts
-      // transparent, an erase cannot be previewed there — it is composited onto the view
-      // directly during rendering instead.
+      // The eraser restores the canvas background. With no background set it erases to
+      // true transparency (`destination-out`); with one set it paints that colour back,
+      // which is what "background colour" means to someone expecting Paint.
       const erasing = this.tool === "eraser";
       this.current = {
         kind: "stroke",
         tool: this.tool,
-        composite: erasing ? "destination-out" : "source-over",
-        color: erasing ? "" : this.foreground,
+        composite: erasing && this.background === null ? "destination-out" : "source-over",
+        color: erasing ? (this.background ?? "") : this.foreground,
         width: this.width,
         points: [point],
       };
@@ -916,12 +938,29 @@ export class Engine {
     const base = this.base;
     if (!ctx || !base) return 0;
 
-    // Alpha-based: the document has no background colour to compare against, so "ink" means
-    // "not transparent". A fixed colour threshold would have counted an erased pixel as ink.
     const { data } = ctx.getImageData(0, 0, base.width, base.height);
     let ink = 0;
-    for (let i = 3; i < data.length; i += 4) {
-      if (data[i]! > 0) ink++;
+
+    if (this.background === null) {
+      // No background: ink means "not transparent".
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i]! > 0) ink++;
+      }
+      return ink;
+    }
+
+    // With a solid background, every pixel is opaque — so "ink" must mean "differs from
+    // the background". Counting alpha would report the entire canvas.
+    const background = parseHex(this.background);
+    for (let i = 0; i < data.length; i += 4) {
+      if (
+        data[i] !== background.r ||
+        data[i + 1] !== background.g ||
+        data[i + 2] !== background.b ||
+        data[i + 3] !== 255
+      ) {
+        ink++;
+      }
     }
     return ink;
   }

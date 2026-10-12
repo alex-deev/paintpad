@@ -13,7 +13,7 @@ declare global {
       settings(): {
         tool: ToolId;
         foreground: string;
-        background: string;
+        background: string | null;
         viewport: { zoom: number; panX: number; panY: number };
       };
       undo(): void;
