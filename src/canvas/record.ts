@@ -225,13 +225,7 @@ function renderShape(ctx: CanvasRenderingContext2D, record: ShapeRecord, rasterS
  * Strokes and shapes draw; fills read and write pixels, so they need their own path. Routing
  * everything through one entry point keeps the engine from needing to know which is which.
  */
-/**
- * Reusable scratch surface for move replay.
- *
- * Module-level so replaying a long history does not allocate a canvas per move record. Sized
- * per use; the canvas is transparent by default and explicitly cleared first, because
- * assigning `width` is the only way to reset it and does not happen when the size matches.
- */
+
 /**
  * The area a record can affect, in integer raster pixels, or null if that is unknown.
  *
@@ -306,16 +300,40 @@ export function recordsForMove(
   });
 }
 
-let scratch: HTMLCanvasElement | null = null;
+/**
+ * Scratch surfaces for move replay, indexed by nesting depth.
+ *
+ * There must be more than one. `applyMove` renders nested records into a scratch surface, and
+ * a nested `move` — moving a region that already carries a move — re-enters this function and
+ * needs one of its own. Sharing a single canvas resized it mid-render and silently duplicated
+ * artwork: moving the same selection twice grew the drawing from 29,561 pixels to 41,588.
+ * One canvas per depth bounds allocation by the deepest nesting actually reached, which for
+ * a document with no stacked moves is one.
+ */
+const scratchPool: HTMLCanvasElement[] = [];
+let scratchDepth = 0;
 
-function getScratch(width: number, height: number): CanvasRenderingContext2D {
-  if (!scratch) scratch = document.createElement("canvas");
-  if (scratch.width !== width) scratch.width = width;
-  if (scratch.height !== height) scratch.height = height;
-  const ctx = scratch.getContext("2d", { colorSpace: "srgb" });
+function borrowScratch(width: number, height: number): {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+} {
+  let canvas = scratchPool[scratchDepth];
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    scratchPool[scratchDepth] = canvas;
+  }
+  scratchDepth++;
+  // Assigning width/height is the only reliable reset, and it does not happen when the size
+  // already matches — hence the explicit clear.
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+
+  const ctx = canvas.getContext("2d", { colorSpace: "srgb" });
   if (!ctx) throw new Error("applyMove: could not acquire a 2D context");
   ctx.clearRect(0, 0, width, height);
-  return ctx;
+  // Matters when a nested move blits INTO this surface.
+  ctx.imageSmoothingEnabled = false;
+  return { canvas, ctx };
 }
 
 /**
@@ -324,36 +342,52 @@ function getScratch(width: number, height: number): CanvasRenderingContext2D {
  * Clears the source first, so moving a region off itself leaves nothing behind — consistent
  * with delete, and with the background being composited beneath the artwork rather than baked
  * in. Baking the background colour here would reintroduce the frozen-pixel bug.
+ *
+ * The destination is drawn through whatever transform the caller established. Forcing identity
+ * here would be wrong: under a nested replay the destination is the outer move's scratch,
+ * which is deliberately translated. Top-level callers establish identity themselves.
  */
 function applyMove(ctx: CanvasRenderingContext2D, record: MoveRecord, rasterScale: number): void {
   const { clip, dx, dy, records } = record;
   if (records.length === 0) return;
 
-  const scratchCtx = getScratch(clip.width, clip.height);
-  scratchCtx.save();
+  const { canvas, ctx: scratchCtx } = borrowScratch(clip.width, clip.height);
   try {
-    // Draw the nested records at their ORIGINAL coordinates, shifted so the clip's top-left
-    // lands at the origin. Anything outside is cut off by the canvas edge.
-    scratchCtx.setTransform(1, 0, 0, 1, -clip.x, -clip.y);
-    for (const nested of records) applyRecord(scratchCtx, nested, rasterScale);
+    scratchCtx.save();
+    try {
+      // Draw the nested records at their ORIGINAL coordinates, shifted so the clip's top-left
+      // lands at the origin. Anything outside is cut off by the canvas edge.
+      scratchCtx.setTransform(1, 0, 0, 1, -clip.x, -clip.y);
+      for (const nested of records) applyRecord(scratchCtx, nested, rasterScale);
+    } finally {
+      scratchCtx.restore();
+    }
   } finally {
-    scratchCtx.restore();
+    scratchDepth--;
   }
 
   ctx.save();
   try {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(clip.x, clip.y, clip.width, clip.height);
     // Smoothing off: at integer offsets this is a straight pixel copy, and leaving it on
     // would resample and soften the anti-aliased edge the move was supposed to preserve.
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(scratch!, clip.x + dx, clip.y + dy);
+    ctx.drawImage(canvas, clip.x + dx, clip.y + dy);
     ctx.imageSmoothingEnabled = true;
   } finally {
     ctx.restore();
   }
 }
 
+/**
+ * Apply any record to a raster context.
+ *
+ * **Requires an identity transform.** Records are drawn through the destination's current
+ * matrix, which is what lets a nested replay inside a move's translated scratch land in the
+ * right place. Every top-level caller — `repaintBase` and `paintRecord` — establishes identity
+ * before calling, which is where the ghost-pixel protection actually lives; forcing identity
+ * here instead would be wrong the moment records nest.
+ */
 export function applyRecord(
   ctx: CanvasRenderingContext2D,
   record: PaintRecord,
@@ -375,17 +409,17 @@ export function applyRecord(
 }
 
 /**
- * Clear a rect on the base.
+ * Clear a rect on the base, through the destination's current transform.
  *
- * The identity transform is set defensively. `clearRect` is subject to the current matrix, so
- * a leftover scale would clear only a fraction of the rect — which is the ghost-pixel bug from
- * the render engine, and the reason this is not just a bare `clearRect` call.
+ * The transform is deliberately NOT forced to identity. Under a nested replay the destination
+ * is a move's scratch surface, which is deliberately translated; forcing identity cleared the
+ * wrong rectangle, which filled a deleted gap back in and grew the artwork by 8,664 pixels.
+ * Every top-level caller establishes identity itself — see `applyRecord`.
  */
 function applyClearRect(ctx: CanvasRenderingContext2D, record: ClearRectRecord): void {
   const { rect } = record;
   ctx.save();
   try {
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(rect.x, rect.y, rect.width, rect.height);
   } finally {
     ctx.restore();

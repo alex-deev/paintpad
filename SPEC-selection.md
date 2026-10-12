@@ -92,6 +92,27 @@ background colour in would reintroduce the frozen-pixel bug fixed in the backgro
   same reason flood fill does not preview.
 - The move commits on release, so a cancelled gesture leaves nothing behind.
 
+### Two bugs this slice found in itself
+
+Both were found by a test asserting a property a move must have — **it conserves pixels** —
+and neither was visible from reading the code.
+
+**One scratch canvas is not enough.** `applyMove` renders nested records into a scratch
+surface, so a second move of the same selection nests the first `move` record and re-enters
+the function. Sharing one canvas resized it mid-render and duplicated artwork: moving the same
+selection twice grew the document from **29,561 pixels to 41,588**. Fixed with a pool indexed
+by nesting depth, which bounds allocation by the deepest nesting actually reached.
+
+**Forcing an identity transform is wrong once records nest.** `applyClearRect` set identity
+defensively, which is good advice everywhere else in this codebase and actively wrong here: a
+selection spanning an earlier deletion nests that `clearRect`, and forcing identity cleared the
+wrong rectangle, filling the deleted gap back in and **growing the artwork by 8,664 pixels**.
+The identity contract now belongs to `applyRecord` and its two top-level callers, where the
+ghost-pixel protection actually lives.
+
+The lesson worth carrying: the defensive `setTransform(identity)` sprinkled through this
+renderer was right until records could nest, at which point it became a bug in both directions.
+
 ## Boundaries
 
 **Always**

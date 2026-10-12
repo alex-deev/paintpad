@@ -237,6 +237,70 @@ test("only records touching the region are carried, not the whole log", async ({
   expect(untouched[3]).toBe(255);
 });
 
+test("moving the same selection twice conserves every pixel", async ({ page }) => {
+  // The regression that motivated the scratch pool. A second move of the same selection
+  // nests the first move record, so `applyMove` re-enters itself. Sharing one scratch
+  // surface resized it mid-render and duplicated artwork: 29,561 pixels became 41,588.
+  // A move moves pixels; it must never create them.
+  await setTool(page, "pencil");
+  await setWidth(page, 24);
+  await page.getByTestId("swatch-foreground").click();
+  await page.locator('button[data-colour="#1b9e77"]').click();
+  await drawStroke(page, { x: 300, y: 300 }, { x: 500, y: 400 }, { steps: 20 });
+
+  const start = await ink(page);
+  await setTool(page, "select");
+  await drag(page, { x: 260, y: 260 }, { x: 540, y: 440 });
+  await drag(page, { x: 400, y: 350 }, { x: 400, y: 250 });
+  expect(await ink(page)).toBe(start);
+  await drag(page, { x: 400, y: 250 }, { x: 400, y: 400 });
+  expect(await ink(page)).toBe(start);
+
+  // And the second move really did nest the first, or this proves nothing.
+  const moves = (await page.evaluate(() => window.__paintpad.historyEntries())).filter(
+    (record) => record.kind === "move",
+  );
+  expect(moves).toHaveLength(2);
+  expect(moves[1]!.records.some((record) => record.kind === "move")).toBe(true);
+
+  await page.evaluate(() => {
+    window.__paintpad.undo();
+    window.__paintpad.undo();
+  });
+  await page.waitForTimeout(400);
+  expect(await ink(page)).toBe(start);
+});
+
+test("a move carries a deleted region without resurrecting it", async ({ page }) => {
+  // A selection spanning an earlier deletion nests that `clearRect`. Rendering it must use
+  // the destination's transform, not force identity — under a nested replay the destination
+  // is the outer move's translated scratch.
+  await setTool(page, "pencil");
+  await setWidth(page, 28);
+  await page.getByTestId("swatch-foreground").click();
+  await page.locator('button[data-colour="#1b9e77"]').click();
+  await drawStroke(page, { x: 300, y: 300 }, { x: 600, y: 300 }, { steps: 24 });
+
+  // Punch a gap in the middle of the band.
+  await setTool(page, "select");
+  await drag(page, { x: 380, y: 230 }, { x: 440, y: 370 });
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(200);
+  const afterDelete = await ink(page);
+
+  // Now take a region that spans the gap plus solid band on both sides, and carry it down.
+  await drag(page, { x: 340, y: 230 }, { x: 520, y: 370 });
+  await drag(page, { x: 430, y: 300 }, { x: 430, y: 420 });
+  expect(await ink(page)).toBe(afterDelete);
+
+  // The gap travelled with the band: solid either side of it, empty where it was.
+  expect((await sampleAt(page, 360, 420))[3]).toBe(255);
+  expect((await sampleAt(page, 410, 420))[3]).toBe(0);
+  expect((await sampleAt(page, 500, 420))[3]).toBe(255);
+  // And the band did not survive at its original position.
+  expect((await sampleAt(page, 410, 300))[3]).toBe(0);
+});
+
 test("a move leaves the rest of the drawing alone", async ({ page }) => {
   await setTool(page, "pencil");
   await setWidth(page, 20);

@@ -11,6 +11,7 @@ declare global {
       snapshotDataUrl(): string | null;
       documentInkCount(): number;
       documentState(): unknown;
+      getSelection(): unknown;
       settings(): {
         tool: ToolId;
         foreground: string;
