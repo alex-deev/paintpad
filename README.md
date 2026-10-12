@@ -103,3 +103,12 @@ rejected.
 - **No image import.** An opened PNG must enter history, and it must enter as `ImageData`,
   which `JSON.stringify` silently destroys. Autosave is now in place, so the remaining
   question is how an image is encoded into the log.
+
+## License
+
+AGPL-3.0 — see [`LICENSE`](LICENSE) for the full text, or
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+Because this is a browser app, §13 is the part that matters in practice: if you fork it and
+run your own hosted copy, you have to offer your users the corresponding source. Deploying
+PaintPad unmodified is fine.

@@ -11,7 +11,7 @@ import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth } from "./document";
 import { floodFill } from "./floodfill";
 import { isDegenerate, shapeBounds, type ShapeKind } from "./shape";
-import { rectsIntersect, type Rect } from "./selection";
+import { rectsIntersect, unionRect, type Rect } from "./selection";
 import { strokeToOps, type DrawOp, type Pt } from "./stroke";
 
 /**
@@ -239,7 +239,13 @@ export function recordBounds(record: PaintRecord, rasterScale: number): Rect | n
       return record.rect;
     case "move": {
       const { clip, dx, dy } = record;
-      return { x: clip.x + dx, y: clip.y + dy, width: clip.width, height: clip.height };
+      const target = { x: clip.x + dx, y: clip.y + dy, width: clip.width, height: clip.height };
+      // BOTH the source and the destination. A move does two things: it clears `clip` and
+      // draws at the target. Reporting only the target meant a later selection over the
+      // vacated source filtered this record out, failed to reproduce the clearing, and
+      // resurrected the pixels from the nested records — a move that created 14,364 pixels
+      // instead of moving any.
+      return unionRect(clip, target);
     }
     case "shape": {
       const bounds = shapeBounds({

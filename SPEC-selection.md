@@ -92,6 +92,25 @@ background colour in would reintroduce the frozen-pixel bug fixed in the backgro
   same reason flood fill does not preview.
 - The move commits on release, so a cancelled gesture leaves nothing behind.
 
+### Bounds must cover every effect, not just the obvious one
+
+Reported as "selecting a part that was previously moved kinda copies the past".
+
+A move has **two** effects on the base: it clears its source `clip`, and it draws at
+`clip + (dx, dy)`. `recordBounds` originally reported only the destination. So a later
+selection overlapping a previous move's *vacated source* filtered that move record out, its
+clearing was never reproduced, and the nested original records painted the content back —
+**45,595 pixels became 59,959**. A move was creating pixels.
+
+The bounds are now the union of source and destination. The general rule this exposes: a
+record's bounds must cover every pixel it can *change*, not the one region it is conceptually
+about. And the test that finds this class of bug is always the same one — does this operation
+conserve pixels — because that is the invariant a compositional edit has to hold.
+
+It also hid from me for a while: moving the same region the *same* distance twice lands the
+resurrected copy exactly on top of the original, and opaque pixels do not stack, so the ink
+count is unchanged and the bug looks fine.
+
 ### Two bugs this slice found in itself
 
 Both were found by a test asserting a property a move must have — **it conserves pixels** —

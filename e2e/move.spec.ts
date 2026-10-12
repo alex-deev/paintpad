@@ -237,6 +237,38 @@ test("only records touching the region are carried, not the whole log", async ({
   expect(untouched[3]).toBe(255);
 });
 
+test("re-selecting a vacated source does not resurrect what was moved out of it", async ({ page }) => {
+  // Reported as "selecting a part that was previously moved kinda copies the past".
+  //
+  // A move clears its source AND draws at its destination. Reporting only the destination in
+  // `recordBounds` meant a later selection over the vacated source filtered the move record
+  // out, so its clearing was never reproduced and the nested original records painted the
+  // band back: 45,595 pixels became 59,959. A move must never create pixels.
+  //
+  // The second move goes a DIFFERENT distance on purpose. Moving it the same way lands the
+  // resurrected copy exactly on top of the original, and opaque pixels do not stack, so the
+  // bug hides itself.
+  await setTool(page, "pencil");
+  await setWidth(page, 28);
+  await page.getByTestId("swatch-foreground").click();
+  await page.locator('button[data-colour="#1b9e77"]').click();
+  await drawStroke(page, { x: 300, y: 300 }, { x: 600, y: 300 }, { steps: 24 });
+
+  await setTool(page, "select");
+  await drag(page, { x: 300, y: 230 }, { x: 400, y: 370 });
+  await drag(page, { x: 350, y: 300 }, { x: 350, y: 450 });
+  const afterFirst = await ink(page);
+
+  await drag(page, { x: 300, y: 230 }, { x: 400, y: 370 });
+  await drag(page, { x: 350, y: 300 }, { x: 350, y: 560 });
+
+  expect(await ink(page)).toBe(afterFirst);
+  // The vacated source is still empty.
+  expect((await sampleAt(page, 350, 300))[3]).toBe(0);
+  // And the band exists once, where the first move put it.
+  expect((await sampleAt(page, 350, 450))[3]).toBe(255);
+});
+
 test("moving the same selection twice conserves every pixel", async ({ page }) => {
   // The regression that motivated the scratch pool. A second move of the same selection
   // nests the first move record, so `applyMove` re-enters itself. Sharing one scratch
