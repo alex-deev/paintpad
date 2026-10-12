@@ -13,7 +13,7 @@
  * after commit — a visible pop on pointerup. Compositing ourselves removes the divergence.
  */
 
-import { normalizeHex, parseHex } from "./color";
+import { normalizeHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
 import {
   canRedo as historyCanRedo,
@@ -380,8 +380,9 @@ export class Engine {
     if (next === null && colour !== null) return; // invalid input leaves state untouched
     if (next === this.background) return;
     this.background = next;
+    // No repaint. The background is not in the raster, so changing it is just a different
+    // fill at composite time — O(1) instead of replaying every record.
     this.refreshSnapshot();
-    this.repaintBase();
     this.requestRender();
     this.emit();
   }
@@ -483,16 +484,33 @@ export class Engine {
       // so a leftover scale would clear only a fraction of the surface and leave ghosts.
       viewCtx.setTransform(1, 0, 0, 1, 0, 0);
       viewCtx.clearRect(0, 0, view.width, view.height);
+
+      // The background is composited BENEATH the artwork rather than stored inside it.
+      // That is what lets a later background change flow through to erased regions: those
+      // regions hold no pixels of their own, so there is nothing stale to repaint.
+      if (this.background !== null) {
+        viewCtx.fillStyle = this.background;
+        viewCtx.fillRect(0, 0, view.width, view.height);
+      }
+
       viewCtx.drawImage(base, 0, 0, view.width, view.height);
       viewCtx.drawImage(overlay, 0, 0, view.width, view.height);
 
-      // The in-progress erase is applied last, directly on the view. During an erase gesture
-      // the additive overlay is empty by construction, so this removes only base content —
-      // and it costs no extra full-size mask canvas.
+      // The in-progress erase is applied last, directly on the view.
+      //
+      // Preview and commit may use different mechanisms as long as they agree visually:
+      // with a background set, punching through on the view would remove the background
+      // too, so the preview paints the background colour into the erased region instead —
+      // which is exactly what the committed destination-out will reveal. With no background,
+      // destination-out is correct and shows the checkerboard.
       if (isEraseInProgress(this.current)) {
         const scale = view.width / base.width;
         viewCtx.setTransform(scale, 0, 0, scale, 0, 0);
-        renderRecord(viewCtx, this.current, this.doc.rasterScale);
+        const preview =
+          this.background === null
+            ? this.current
+            : { ...this.current, composite: "source-over" as const, color: this.background };
+        renderRecord(viewCtx, preview, this.doc.rasterScale);
       }
     } finally {
       viewCtx.restore();
@@ -573,17 +591,12 @@ export class Engine {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      // The background is filled FIRST, so it always sits beneath every mark. It is a
-      // document property rather than a record, which is why it is applied here instead of
-      // being replayed.
-      if (this.background !== null) {
-        ctx.fillStyle = this.background;
-        ctx.fillRect(0, 0, base.width, base.height);
-      } else {
-        // Transparent, not white: the document has a real alpha channel and "New" means
-        // nothing rather than a sheet of paper.
-        ctx.clearRect(0, 0, base.width, base.height);
-      }
+      // `base` holds ARTWORK ONLY. The background is deliberately NOT filled in here: if it
+      // were baked into the raster, the eraser (which removes artwork) would leave a frozen
+      // copy of whatever the background was at erase time, which then fails to repaint.
+      // Keeping it out means an erased region is genuinely absent artwork and the
+      // background shows through, now and after any later background change.
+      ctx.clearRect(0, 0, base.width, base.height);
       for (const record of visibleEntries(this.history)) {
         renderRecord(ctx, record, this.doc.rasterScale);
       }
@@ -671,15 +684,17 @@ export class Engine {
       this.anchor = point;
       this.current = this.buildShape(point, point);
     } else {
-      // The eraser restores the canvas background. With no background set it erases to
-      // true transparency (`destination-out`); with one set it paints that colour back,
-      // which is what "background colour" means to someone expecting Paint.
+      // The eraser is ALWAYS destination-out. Because the background is composited beneath
+      // the artwork rather than baked into it, an erased region simply holds no artwork —
+      // so whether it reads as the background colour or as transparency falls out of the
+      // background setting, and a later background change repaints it automatically.
+      // Baking the background in and painting it here was what froze erased pixels.
       const erasing = this.tool === "eraser";
       this.current = {
         kind: "stroke",
         tool: this.tool,
-        composite: erasing && this.background === null ? "destination-out" : "source-over",
-        color: erasing ? (this.background ?? "") : this.foreground,
+        composite: erasing ? "destination-out" : "source-over",
+        color: erasing ? "" : this.foreground,
         width: this.width,
         points: [point],
       };
@@ -910,9 +925,29 @@ export class Engine {
     event.preventDefault();
   };
 
-  /** Debug/e2e affordance: the committed pixel buffer as a data URL. */
+  /**
+   * Debug/e2e affordance: the committed document as a PNG data URL.
+   *
+   * Composited into a scratch canvas so exports carry the background, at the document's
+   * raster size rather than the view's — reading the view canvas would bake the current zoom
+   * and devicePixelRatio into the export.
+   */
   snapshotDataUrl(): string | null {
-    return this.base?.toDataURL("image/png") ?? null;
+    const base = this.base;
+    if (!base) return null;
+
+    const scratch = document.createElement("canvas");
+    scratch.width = base.width;
+    scratch.height = base.height;
+    const ctx = scratch.getContext("2d");
+    if (!ctx) return null;
+
+    if (this.background !== null) {
+      ctx.fillStyle = this.background;
+      ctx.fillRect(0, 0, scratch.width, scratch.height);
+    }
+    ctx.drawImage(base, 0, 0);
+    return scratch.toDataURL("image/png");
   }
 
   /** Debug/e2e affordance: committed record count. */
@@ -938,29 +973,12 @@ export class Engine {
     const base = this.base;
     if (!ctx || !base) return 0;
 
+    // `base` holds artwork only — the background is not in it — so "ink" is simply "not
+    // transparent". One rule covers both background modes.
     const { data } = ctx.getImageData(0, 0, base.width, base.height);
     let ink = 0;
-
-    if (this.background === null) {
-      // No background: ink means "not transparent".
-      for (let i = 3; i < data.length; i += 4) {
-        if (data[i]! > 0) ink++;
-      }
-      return ink;
-    }
-
-    // With a solid background, every pixel is opaque — so "ink" must mean "differs from
-    // the background". Counting alpha would report the entire canvas.
-    const background = parseHex(this.background);
-    for (let i = 0; i < data.length; i += 4) {
-      if (
-        data[i] !== background.r ||
-        data[i + 1] !== background.g ||
-        data[i + 2] !== background.b ||
-        data[i + 3] !== 255
-      ) {
-        ink++;
-      }
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i]! > 0) ink++;
     }
     return ink;
   }
