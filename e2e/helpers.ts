@@ -10,11 +10,15 @@ declare global {
       recordCount: number;
       snapshotDataUrl(): string | null;
       documentInkCount(): number;
+      documentState(): unknown;
       settings(): {
         tool: ToolId;
         foreground: string;
         background: string | null;
         viewport: { zoom: number; panX: number; panY: number };
+        canUndo: boolean;
+        canRedo: boolean;
+        recordCount: number;
       };
       undo(): void;
       redo(): void;

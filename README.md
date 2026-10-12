@@ -63,6 +63,10 @@ through the same `renderRecord` path, so a committed pixel and a replayed pixel 
 pixel. `History` is a pure reducer over `{entries, cursor}`; the base canvas is a cache, not
 the source of truth.
 
+Autosave persists that log, so the document returns by replaying the same path live drawing
+took — there is no separate restore format. The redo stack survives too: reload part-way
+through an undo and you can still redo.
+
 Consequences worth knowing:
 
 - **Backgrounds are composited, not baked.** `base` holds artwork only. An erased region
@@ -91,6 +95,6 @@ rejected.
 - **Screenshot goldens cannot verify alpha.** Playwright's image comparison treats fully
   transparent pixels as "don't care". The goldens verify strokes; transparency is asserted
   directly on the alpha channel in `e2e/transparency.spec.ts`.
-- **No persistence yet.** A refresh loses your work — export before you close the tab.
-- **No image import.** Export only, deliberately: an opened PNG must enter history as an
-  `ImageData` record, and `JSON.stringify` silently destroys `ImageData`.
+- **No image import.** An opened PNG must enter history, and it must enter as `ImageData`,
+  which `JSON.stringify` silently destroys. Autosave is now in place, so the remaining
+  question is how an image is encoded into the log.

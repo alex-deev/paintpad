@@ -2,6 +2,8 @@ import { StrictMode, useCallback, useEffect, useRef, useState, useSyncExternalSt
 import { createRoot } from "react-dom/client";
 import { DEFAULT_PALETTE, normalizeHex, readableTextOn } from "./canvas/color";
 import { Engine } from "./canvas/engine";
+import { decode, encode } from "./canvas/serialize";
+import { clearDocument, flushSave, loadDocument, saveDocument } from "./canvas/storage";
 import type { ToolId } from "./canvas/record";
 import "./styles.css";
 
@@ -17,6 +19,9 @@ const TOOLS: { id: ToolId; key: string }[] = [
 ];
 
 const RECENTS_KEY = "paintpad.recents";
+
+/** Autosave debounce. Long enough to coalesce a gesture, short enough to lose almost nothing. */
+const SAVE_DEBOUNCE_MS = 400;
 
 function loadRecents(): string[] {
   try {
@@ -47,6 +52,11 @@ function App() {
   const [recents, setRecents] = useState<string[]>(loadRecents);
   const [hexDraft, setHexDraft] = useState("");
   const [hexError, setHexError] = useState(false);
+  // Boot is asynchronous now: the autosave is read before the engine is attached, so the
+  // raster is sized to the saved document. The canvas stays hidden until that finishes,
+  // because a visible canvas that has not had its pointer handlers wired up yet is a lie —
+  // it would accept clicks and paint nothing.
+  const [ready, setReady] = useState(false);
 
   const settings = useSyncExternalStore(
     (onChange) => engine.subscribe(() => onChange()),
@@ -59,22 +69,101 @@ function App() {
     const stage = stageRef.current;
     if (!canvas || !stage) return;
 
-    engine.attach(canvas, stage);
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
 
-    const observer = new ResizeObserver(() => {
-      engine.setStageSize({ width: stage.clientWidth, height: stage.clientHeight });
-    });
-    observer.observe(stage);
+    // Autosave loads the command log, not a raster, so the document comes back by replaying
+    // exactly the path live drawing took. Everything here is best-effort: a corrupt save, an
+    // unreadable store, or storage disabled outright all resolve to "start clean", because a
+    // failed save must never stop the app from drawing.
+    void (async () => {
+      const saved = await loadDocument()
+        .then((raw) => (raw === null ? null : decode(raw)))
+        .catch(() => null);
+      if (disposed) return;
 
-    // Expose for Playwright goldens and manual poking. Gated so a shipped build does not
-    // leak internals; the e2e suite runs against the dev server, where this is true.
-    if (import.meta.env.DEV) {
-      (window as unknown as { __paintpad: Engine }).__paintpad = engine;
-    }
+      engine.attach(canvas, stage);
+      if (saved) engine.restore(saved);
+      setReady(true);
+
+      const observer = new ResizeObserver(() => {
+        engine.setStageSize({ width: stage.clientWidth, height: stage.clientHeight });
+      });
+      observer.observe(stage);
+
+      // Persist on document changes only — not on zoom, tool, or colour selection, which do
+      // not alter the log. Debounced so a stroke with many pointer samples is not serialised
+      // repeatedly.
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let lastSaved: string | null = null;
+
+      const write = () => {
+        // Zoom, pan and tool changes all emit, but do not alter the document. Comparing the
+        // encoded form keeps those from rewriting an identical save.
+        const json = encode(engine.documentState());
+        if (json === lastSaved) return;
+        lastSaved = json;
+        void saveDocument(json).catch(() => {});
+      };
+
+      const scheduleSave = () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          write();
+        }, SAVE_DEBOUNCE_MS);
+      };
+
+      // The debounce has a cost: without this, closing the tab within SAVE_DEBOUNCE_MS of the
+      // last stroke would lose exactly that stroke — the one failure autosave exists to
+      // prevent.
+      //
+      // This is deliberately unconditional, and gated on nothing. An earlier version skipped
+      // the flush when no debounce was pending, reasoning that the write had already gone
+      // out. It had — but an IndexedDB transaction begun moments before unload does not
+      // commit, so the skip lost the stroke anyway. `lastSaved` records what was *attempted*,
+      // never what is durable, and it must not be used to justify skipping here.
+      //
+      // `flushSave` is synchronous precisely because of that: `localStorage.setItem` always
+      // completes, so this write cannot be lost to the unload it is reacting to.
+      const flush = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        const json = encode(engine.documentState());
+        lastSaved = json;
+        flushSave(json);
+        void saveDocument(json).catch(() => {});
+      };
+
+      const onVisibilityChange = () => {
+        if (document.visibilityState === "hidden") flush();
+      };
+
+      const unsubscribe = engine.subscribe(scheduleSave);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      window.addEventListener("pagehide", flush);
+
+      // Expose for Playwright goldens and manual poking. Gated so a shipped build does not
+      // leak internals; the e2e suite runs against the dev server, where this is true.
+      if (import.meta.env.DEV) {
+        (window as unknown as { __paintpad: Engine }).__paintpad = engine;
+      }
+
+      cleanup = () => {
+        observer.disconnect();
+        unsubscribe();
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+        window.removeEventListener("pagehide", flush);
+        if (timer !== null) clearTimeout(timer);
+        engine.detach();
+      };
+    })();
 
     return () => {
-      observer.disconnect();
-      engine.detach();
+      disposed = true;
+      cleanup?.();
     };
   }, [engine]);
 
@@ -199,7 +288,14 @@ function App() {
           <button type="button" onClick={() => engine.fitToStage()}>
             Fit
           </button>
-          <button type="button" onClick={() => engine.reset()}>
+          <button
+            type="button"
+            onClick={() => {
+              engine.reset();
+              // Clear must wipe the save too, or a reload resurrects what was just cleared.
+              void clearDocument();
+            }}
+          >
             Clear
           </button>
           <button
@@ -214,7 +310,12 @@ function App() {
       </header>
 
       <div className="stage" ref={stageRef}>
-        <canvas ref={canvasRef} className="surface" aria-label="Drawing canvas" />
+        <canvas
+          ref={canvasRef}
+          className="surface"
+          aria-label="Drawing canvas"
+          style={{ visibility: ready ? "visible" : "hidden" }}
+        />
       </div>
 
       <div className="colourbar">

@@ -13,6 +13,11 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"]],
   expect: {
+    // Boot is asynchronous: the app reads its autosave before attaching the engine, and the
+    // canvas stays hidden until that finishes. `toBeVisible()` is therefore a boot barrier
+    // now, and 5s is uncomfortably tight on a loaded 4-core box — which produced intermittent
+    // failures at unrelated test sites. Generous enough to absorb a slow first paint.
+    timeout: 15_000,
     toHaveScreenshot: {
       // Canvas AA can differ by a hair across GPU/driver paths. A tight tolerance would
       // make this gate flaky, which trains people to ignore it.

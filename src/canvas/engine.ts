@@ -36,6 +36,7 @@ import {
   type StrokeRecord,
   type ToolId,
 } from "./record";
+import { SAVE_VERSION, type SavedDocument } from "./serialize";
 import { isDegenerate, normalizeShape, type ShapeKind } from "./shape";
 import type { Pt } from "./stroke";
 import {
@@ -113,7 +114,7 @@ export interface EngineSettings {
 }
 
 export class Engine {
-  readonly doc: DocModel;
+  private doc: DocModel;
 
   /**
    * The single source of truth for the document. The canvas is always derived by replaying
@@ -553,6 +554,70 @@ export class Engine {
    * "Clear" discards the document and its history. Deliberately NOT undoable — the
    * equivalent of Paint's "New".
    */
+  /**
+   * Adopt a restored document: its background and its history, at the cursor the user had
+   * undone back to.
+   *
+   * `loadRecords` cannot do this — it forces the cursor to the tip, which would silently
+   * discard the redo stack of anyone who reloaded mid-undo.
+   *
+   * The doc model itself is supplied to the constructor rather than here, because the base
+   * canvas is sized from it in `attach`. Restoring before those pixels exist is what lets a
+   * saved document come back at the size it was drawn at without a resize path.
+   */
+  restore(document: SavedDocument): void {
+    // Adopt the saved size if it differs, so a document drawn at another size comes back at
+    // that size rather than being cropped or letterboxed into this one's.
+    if (
+      document.doc.logicalWidth !== this.doc.logicalWidth ||
+      document.doc.logicalHeight !== this.doc.logicalHeight ||
+      document.doc.rasterScale !== this.doc.rasterScale
+    ) {
+      this.applyDoc(document.doc);
+    }
+    this.background = document.background;
+    this.history = {
+      entries: document.entries,
+      // Already clamped by `decode`, but this is also reachable from tests.
+      cursor: Math.min(Math.max(document.cursor, 0), document.entries.length),
+    };
+    this.repaintBase();
+    this.clearOverlay();
+    this.current = null;
+    this.anchor = null;
+    this.requestRender();
+    this.emit();
+  }
+
+  /** Swap the document model and resize the raster surfaces to match. */
+  private applyDoc(doc: DocModel): void {
+    this.doc = doc;
+    const width = rasterWidth(doc);
+    const height = rasterHeight(doc);
+    // Assigning width/height clears the canvas, so this must precede the repaint.
+    if (this.base) {
+      this.base.width = width;
+      this.base.height = height;
+    }
+    if (this.overlay) {
+      this.overlay.width = width;
+      this.overlay.height = height;
+    }
+    this.fitToStage();
+    this.relayout();
+  }
+
+  /** The current document, ready to persist. Reads state rather than deriving pixels. */
+  documentState(): SavedDocument {
+    return {
+      v: SAVE_VERSION,
+      doc: this.doc,
+      background: this.background,
+      entries: [...this.history.entries],
+      cursor: this.history.cursor,
+    };
+  }
+
   reset(): void {
     this.history = createHistory();
     this.repaintBase();

@@ -21,6 +21,7 @@ export default defineConfig({
         "src/canvas/document.ts",
         "src/canvas/floodfill.ts",
         "src/canvas/history.ts",
+        "src/canvas/serialize.ts",
         "src/canvas/shape.ts",
         "src/canvas/stroke.ts",
         "src/canvas/viewport.ts",
