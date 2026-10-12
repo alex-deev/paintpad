@@ -128,9 +128,11 @@ test("a move carries the pixels and leaves the source transparent", async ({ pag
   expect(destination[3]).toBe(255);
 });
 
-test("a move is a record holding nested records, not pixels", async ({ page }) => {
-  // The whole design rests on this. An ImageData payload survives JSON.stringify as an empty
-  // object and silently corrupts the autosave.
+test("a move carries its region as a JSON-safe data URL", async ({ page }) => {
+  // A retreat from "records are parameters", made on measurement: nesting the records that
+  // produced a region was exact but duplicated exponentially — one stroke dragged ten times
+  // was nested 1024 times over. A data URL is a string, so unlike `ImageData` it survives
+  // JSON.stringify, which is the trap that has deferred image import twice.
   await setTool(page, "pencil");
   await setWidth(page, 24);
   await page.getByTestId("swatch-foreground").click();
@@ -148,12 +150,42 @@ test("a move is a record holding nested records, not pixels", async ({ page }) =
   expect(move.dx).toBeGreaterThan(0);
   expect(move.dy).toBe(0);
   expect(Number.isInteger(move.dx)).toBe(true);
-  expect(Array.isArray(move.records)).toBe(true);
+  expect(move.image.startsWith("data:image/png")).toBe(true);
+  // Survives a JSON round trip intact — the property `ImageData` fails.
   expect(JSON.parse(JSON.stringify(move))).toEqual(move);
+  // And stays small: PNG compresses flat artwork well.
+  expect(move.image.length).toBeLessThan(200_000);
+});
 
-  // JSON-serialisable end to end, and no megabytes of base64 hiding in it.
-  const json = JSON.stringify(move);
-  expect(json.length).toBeLessThan(20_000);
+test("history grows linearly with repeated moves, not exponentially", async ({ page }) => {
+  // The reported symptom: re-selecting and moving repeatedly got slower and slower. Nesting
+  // made each move embed the previous one, doubling the log every time — 1.3 MB after ten
+  // moves, for a single stroke.
+  await setTool(page, "pencil");
+  await setWidth(page, 28);
+  await page.getByTestId("swatch-foreground").click();
+  await page.locator('button[data-colour="#1b9e77"]').click();
+  await drawStroke(page, { x: 300, y: 300 }, { x: 600, y: 300 }, { steps: 24 });
+
+  await setTool(page, "select");
+  await drag(page, { x: 300, y: 230 }, { x: 400, y: 370 });
+
+  const sizeAfterMove = async () => {
+    await drag(page, { x: 350, y: 300 }, { x: 350, y: 450 });
+    return page.evaluate(() => JSON.stringify(window.__paintpad.historyEntries()).length);
+  };
+
+  await sizeAfterMove();
+  await sizeAfterMove();
+  await sizeAfterMove();
+  const at3 = await sizeAfterMove();
+  await sizeAfterMove();
+  await sizeAfterMove();
+  const at6 = await sizeAfterMove();
+
+  // Doubling would give 16x over four more moves. Linear over a bounded region gives a small
+  // multiple, not an exponential one.
+  expect(at6).toBeLessThan(at3 * 3);
 });
 
 test("undo restores a move byte-identically, and redo reapplies it", async ({ page }) => {
@@ -213,100 +245,9 @@ test("a move that ends where it started records nothing", async ({ page }) => {
   expect(await recordCount(page)).toBe(before);
 });
 
-test("only records touching the region are carried, not the whole log", async ({ page }) => {
-  // Bounds filtering is what stops history growing multiplicatively.
-  await setTool(page, "pencil");
-  await setWidth(page, 16);
-  await page.getByTestId("swatch-foreground").click();
-  await page.locator('button[data-colour="#1b9e77"]').click();
-
-  // Two strokes: one inside the selection area, one far away.
-  await drawStroke(page, { x: 250, y: 250 }, { x: 420, y: 380 }, { steps: 16 });
-  await drawStroke(page, { x: 800, y: 480 }, { x: 980, y: 600 }, { steps: 16 });
-
-  await setTool(page, "select");
-  await drag(page, { x: 200, y: 200 }, { x: 500, y: 450 });
-  await drag(page, { x: 300, y: 300 }, { x: 360, y: 340 });
-
-  const move = (await page.evaluate(() => window.__paintpad.historyEntries()))[2]!;
-  if (move.kind !== "move") throw new Error("expected a move");
-
-  // Only the stroke inside the clip is carried; the far one is left where it was.
-  expect(move.records).toHaveLength(1);
-  const untouched = await sampleAt(page, 890, 540);
-  expect(untouched[3]).toBe(255);
-});
-
-test("re-selecting a vacated source does not resurrect what was moved out of it", async ({ page }) => {
-  // Reported as "selecting a part that was previously moved kinda copies the past".
-  //
-  // A move clears its source AND draws at its destination. Reporting only the destination in
-  // `recordBounds` meant a later selection over the vacated source filtered the move record
-  // out, so its clearing was never reproduced and the nested original records painted the
-  // band back: 45,595 pixels became 59,959. A move must never create pixels.
-  //
-  // The second move goes a DIFFERENT distance on purpose. Moving it the same way lands the
-  // resurrected copy exactly on top of the original, and opaque pixels do not stack, so the
-  // bug hides itself.
-  await setTool(page, "pencil");
-  await setWidth(page, 28);
-  await page.getByTestId("swatch-foreground").click();
-  await page.locator('button[data-colour="#1b9e77"]').click();
-  await drawStroke(page, { x: 300, y: 300 }, { x: 600, y: 300 }, { steps: 24 });
-
-  await setTool(page, "select");
-  await drag(page, { x: 300, y: 230 }, { x: 400, y: 370 });
-  await drag(page, { x: 350, y: 300 }, { x: 350, y: 450 });
-  const afterFirst = await ink(page);
-
-  await drag(page, { x: 300, y: 230 }, { x: 400, y: 370 });
-  await drag(page, { x: 350, y: 300 }, { x: 350, y: 560 });
-
-  expect(await ink(page)).toBe(afterFirst);
-  // The vacated source is still empty.
-  expect((await sampleAt(page, 350, 300))[3]).toBe(0);
-  // And the band exists once, where the first move put it.
-  expect((await sampleAt(page, 350, 450))[3]).toBe(255);
-});
-
-test("moving the same selection twice conserves every pixel", async ({ page }) => {
-  // The regression that motivated the scratch pool. A second move of the same selection
-  // nests the first move record, so `applyMove` re-enters itself. Sharing one scratch
-  // surface resized it mid-render and duplicated artwork: 29,561 pixels became 41,588.
-  // A move moves pixels; it must never create them.
-  await setTool(page, "pencil");
-  await setWidth(page, 24);
-  await page.getByTestId("swatch-foreground").click();
-  await page.locator('button[data-colour="#1b9e77"]').click();
-  await drawStroke(page, { x: 300, y: 300 }, { x: 500, y: 400 }, { steps: 20 });
-
-  const start = await ink(page);
-  await setTool(page, "select");
-  await drag(page, { x: 260, y: 260 }, { x: 540, y: 440 });
-  await drag(page, { x: 400, y: 350 }, { x: 400, y: 250 });
-  expect(await ink(page)).toBe(start);
-  await drag(page, { x: 400, y: 250 }, { x: 400, y: 400 });
-  expect(await ink(page)).toBe(start);
-
-  // And the second move really did nest the first, or this proves nothing.
-  const moves = (await page.evaluate(() => window.__paintpad.historyEntries())).filter(
-    (record) => record.kind === "move",
-  );
-  expect(moves).toHaveLength(2);
-  expect(moves[1]!.records.some((record) => record.kind === "move")).toBe(true);
-
-  await page.evaluate(() => {
-    window.__paintpad.undo();
-    window.__paintpad.undo();
-  });
-  await page.waitForTimeout(400);
-  expect(await ink(page)).toBe(start);
-});
-
 test("a move carries a deleted region without resurrecting it", async ({ page }) => {
-  // A selection spanning an earlier deletion nests that `clearRect`. Rendering it must use
-  // the destination's transform, not force identity — under a nested replay the destination
-  // is the outer move's translated scratch.
+  // The snapshot includes the gap, so the gap travels with the band rather than being filled
+  // back in.
   await setTool(page, "pencil");
   await setWidth(page, 28);
   await page.getByTestId("swatch-foreground").click();

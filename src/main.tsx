@@ -2,6 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState, useSyncExternalSt
 import { createRoot } from "react-dom/client";
 import { DEFAULT_PALETTE, normalizeHex, readableTextOn } from "./canvas/color";
 import { Engine } from "./canvas/engine";
+import { prepareRecords } from "./canvas/record";
 import { decode, encode } from "./canvas/serialize";
 import { clearDocument, flushSave, loadDocument, saveDocument } from "./canvas/storage";
 import type { ToolId } from "./canvas/record";
@@ -81,6 +82,9 @@ function App() {
       const saved = await loadDocument()
         .then((raw) => (raw === null ? null : decode(raw)))
         .catch(() => null);
+      // Moves carry their region as a PNG, and decoding one is async while replay is not.
+      // Pre-decoding here is what lets the first render after a reload be correct.
+      if (saved) await prepareRecords(saved.entries);
       if (disposed) return;
 
       engine.attach(canvas, stage);

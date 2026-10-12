@@ -132,6 +132,42 @@ ghost-pixel protection actually lives.
 The lesson worth carrying: the defensive `setTransform(identity)` sprinkled through this
 renderer was right until records could nest, at which point it became a bug in both directions.
 
+### Slice 11b — a move carries pixels, because nesting was exponential
+
+Reported as "re-selecting and moving multiple times becomes more and more slow over time".
+
+Measured, and it was worse than the O(n²) this spec had assumed for nesting:
+
+| moves | stroke copies in the log | autosave size |
+|---|---|---|
+| 1 | 2 | 2.5 KB |
+| 5 | 32 | 42 KB |
+| 10 | **1024** | **1.3 MB** |
+
+Each move embedded the previous move *and* the primitives, so the log doubled every move —
+2^(k-1). Twenty moves would be gigabytes, for a single stroke.
+
+**Re-expanding a move into translated primitives was considered and rejected as incorrect.** A
+stroke intersecting a region extends beyond it, so re-drawing it unclipped paints content the
+real document never had, and there is no per-primitive clipping in this renderer to prevent
+that. Correctness first, and it was also not cheaper.
+
+**So a move now carries its region as a PNG data URL.** This is a deliberate retreat from
+"records are parameters". A selection's content is a pixel fact, and storing the pixels is the
+honest representation. A data URL is a string — unlike `ImageData`, it survives
+`JSON.stringify`, which is the trap that has deferred image import twice. Cost is now O(1)
+per move regardless of how many came before.
+
+Two consequences worth recording:
+
+- **Replay is synchronous, PNG decoding is not.** Decoded bitmaps are cached by data URL. A move
+  made in a session registers the canvas it was captured from, needing no decode at all; a move
+  arriving from storage is decoded by `prepareRecords` during boot, before the first render. If
+  that ordering is broken, a restored move silently renders nothing.
+- **The scratch pool and the whole nesting story are gone.** Moves no longer nest, so there is
+  no reentrancy to guard, and `recordBounds` / `recordsForMove` were deleted rather than left
+  behind as dead code.
+
 ## Boundaries
 
 **Always**

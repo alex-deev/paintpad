@@ -11,7 +11,7 @@ import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth } from "./document";
 import { floodFill } from "./floodfill";
 import { isDegenerate, shapeBounds, type ShapeKind } from "./shape";
-import { rectsIntersect, unionRect, type Rect } from "./selection";
+import type { Rect } from "./selection";
 import { strokeToOps, type DrawOp, type Pt } from "./stroke";
 
 /**
@@ -94,25 +94,34 @@ export interface ClearRectRecord {
 /**
  * Move a rectangular region.
  *
- * The second pixel-shaped record, and the one that settles whether the model generalises. It
- * stores the records that *produced* the region rather than the region's pixels, so history
- * stays JSON-safe and replay stays a re-derivation rather than a lookup.
+ * The region travels as a PNG data URL rather than as the records that produced it. That is a
+ * deliberate retreat from "records are parameters", and the earlier design was measured to be
+ * untenable: each move embedded the previous move *and* the primitives, so a single stroke
+ * dragged ten times ended up nested 1024 times over and the autosave grew to 1.3 MB. Ten more
+ * and it would be gigabytes. Re-deriving the region was exact, but it duplicated content
+ * exponentially to achieve it.
  *
- * Replay renders the region to a scratch canvas and blits it at an offset. That is not
- * decoration: `applyFill` goes through `getImageData`/`putImageData`, which are
- * transform-independent, so a nested fill would ignore a clip-and-translate on the main
- * context entirely. The scratch canvas *is* the clip, and handles every record kind
- * uniformly.
+ * Re-expanding a move into translated primitives was considered and rejected as wrong: a
+ * stroke intersecting the region extends beyond it, so re-drawing it unclipped paints content
+ * the real document never had, and there is no per-primitive clipping to prevent that.
+ *
+ * A selection's content is a pixel fact. Storing the pixels is the honest representation, and
+ * a data URL is a string — unlike `ImageData`, it survives `JSON.stringify`, which is the trap
+ * that has deferred image import twice.
+ *
+ * The decoded bitmap is cached by data URL and drawn synchronously, because replay is
+ * synchronous and decoding a PNG is not. `prepareRecords` populates the cache for records
+ * arriving from storage.
  */
 export interface MoveRecord {
   readonly kind: "move";
-  /** Records whose rendering within `clip` is carried to the new position. */
-  readonly records: readonly PaintRecord[];
   /** Offset in raster pixels. Integer, so the blit is 1:1 and lossless. */
   readonly dx: number;
   readonly dy: number;
   /** The source region, in integer raster coordinates. Also the area left behind. */
   readonly clip: Rect;
+  /** PNG data URL of the region as it was before the move. */
+  readonly image: string;
 }
 
 /** The union of everything that can appear in history.
@@ -219,181 +228,76 @@ function renderShape(ctx: CanvasRenderingContext2D, record: ShapeRecord, rasterS
   if (clampStrokeWidth(record.strokeWidth) > 0) ctx.stroke();
 }
 
-/**
- * Apply any record to a raster context.
- *
- * Strokes and shapes draw; fills read and write pixels, so they need their own path. Routing
- * everything through one entry point keeps the engine from needing to know which is which.
- */
 
 /**
- * The area a record can affect, in integer raster pixels, or null if that is unknown.
+ * Decoded move bitmaps, keyed by data URL.
  *
- * Null means "assume anywhere" and is what keeps a move from silently dropping content. It
- * applies to fills, whose extent depends on the artwork underneath them and cannot be known
- * without replaying the document up to that point.
+ * Replay is synchronous and PNG decoding is not, so the image must be decoded before it is
+ * ever drawn. A move created during a session caches the canvas it was captured from, needing
+ * no decoding at all. A move arriving from storage is decoded by `prepareRecords` during the
+ * boot load, before the first render.
+ *
+ * Keyed by data URL because that is unique per move and survives a round trip through storage
+ * unchanged.
  */
-export function recordBounds(record: PaintRecord, rasterScale: number): Rect | null {
-  switch (record.kind) {
-    case "clearRect":
-      return record.rect;
-    case "move": {
-      const { clip, dx, dy } = record;
-      const target = { x: clip.x + dx, y: clip.y + dy, width: clip.width, height: clip.height };
-      // BOTH the source and the destination. A move does two things: it clears `clip` and
-      // draws at the target. Reporting only the target meant a later selection over the
-      // vacated source filtered this record out, failed to reproduce the clearing, and
-      // resurrected the pixels from the nested records — a move that created 14,364 pixels
-      // instead of moving any.
-      return unionRect(clip, target);
-    }
-    case "shape": {
-      const bounds = shapeBounds({
-        kind: record.shape,
-        from: record.from,
-        to: record.to,
-      });
-      return bounds === null
-        ? null
-        : {
-            x: Math.floor(bounds.x),
-            y: Math.floor(bounds.y),
-            // Grown by the stroke width, which extends past the geometric bounds.
-            width: Math.ceil(bounds.x + bounds.width) + 2,
-            height: Math.ceil(bounds.y + bounds.height) + 2,
-          };
-    }
-    case "stroke": {
-      if (record.points.length === 0) return null;
-      const half = (clampStrokeWidth(record.width) * rasterScale) / 2;
-      let minX = Number.POSITIVE_INFINITY;
-      let minY = Number.POSITIVE_INFINITY;
-      let maxX = Number.NEGATIVE_INFINITY;
-      let maxY = Number.NEGATIVE_INFINITY;
-      for (const point of record.points) {
-        if (point.x < minX) minX = point.x;
-        if (point.y < minY) minY = point.y;
-        if (point.x > maxX) maxX = point.x;
-        if (point.y > maxY) maxY = point.y;
+const moveBitmaps = new Map<string, CanvasImageSource>();
+
+/** Register an already-rendered region so replay can draw it without decoding. */
+export function registerMoveBitmap(dataUrl: string, source: CanvasImageSource): void {
+  moveBitmaps.set(dataUrl, source);
+}
+
+/**
+ * Decode every move in a document that is about to be replayed.
+ *
+ * Must be awaited before the first render, or a restored move has no bitmap to draw and
+ * silently renders nothing. Failures resolve rather than throw: a move whose image will not
+ * decode is a lost region, not a lost application.
+ */
+export async function prepareRecords(records: readonly PaintRecord[]): Promise<void> {
+  await Promise.all(
+    records.map(async (record) => {
+      if (record.kind !== "move" || moveBitmaps.has(record.image)) return;
+      try {
+        const image = new Image();
+        image.src = record.image;
+        await image.decode();
+        moveBitmaps.set(record.image, image);
+      } catch {
+        // Leave it uncached; applyMove draws nothing rather than throwing mid-replay.
       }
-      return {
-        x: Math.floor(minX - half),
-        y: Math.floor(minY - half),
-        width: Math.ceil(maxX + half) - Math.floor(minX - half),
-        height: Math.ceil(maxY + half) - Math.floor(minY - half),
-      };
-    }
-    case "fill":
-      return null;
-  }
+    }),
+  );
 }
 
 /**
- * The records a move of `clip` must carry.
- *
- * Bounds filtering is what stops a long session's history growing multiplicatively: without
- * it every move embeds the entire prior log. Unknown bounds are included, because a region
- * that silently lost a fill would look like a renderer bug rather than a missed record.
- */
-export function recordsForMove(
-  records: readonly PaintRecord[],
-  clip: Rect,
-  rasterScale: number,
-): PaintRecord[] {
-  return records.filter((record) => {
-    const bounds = recordBounds(record, rasterScale);
-    return bounds === null || rectsIntersect(bounds, clip);
-  });
-}
-
-/**
- * Scratch surfaces for move replay, indexed by nesting depth.
- *
- * There must be more than one. `applyMove` renders nested records into a scratch surface, and
- * a nested `move` — moving a region that already carries a move — re-enters this function and
- * needs one of its own. Sharing a single canvas resized it mid-render and silently duplicated
- * artwork: moving the same selection twice grew the drawing from 29,561 pixels to 41,588.
- * One canvas per depth bounds allocation by the deepest nesting actually reached, which for
- * a document with no stacked moves is one.
- */
-const scratchPool: HTMLCanvasElement[] = [];
-let scratchDepth = 0;
-
-function borrowScratch(width: number, height: number): {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-} {
-  let canvas = scratchPool[scratchDepth];
-  if (!canvas) {
-    canvas = document.createElement("canvas");
-    scratchPool[scratchDepth] = canvas;
-  }
-  scratchDepth++;
-  // Assigning width/height is the only reliable reset, and it does not happen when the size
-  // already matches — hence the explicit clear.
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-
-  const ctx = canvas.getContext("2d", { colorSpace: "srgb" });
-  if (!ctx) throw new Error("applyMove: could not acquire a 2D context");
-  ctx.clearRect(0, 0, width, height);
-  // Matters when a nested move blits INTO this surface.
-  ctx.imageSmoothingEnabled = false;
-  return { canvas, ctx };
-}
-
-/**
- * Carry the contents of `clip` by `(dx, dy)`.
+ * Carry the captured region by `(dx, dy)`.
  *
  * Clears the source first, so moving a region off itself leaves nothing behind — consistent
  * with delete, and with the background being composited beneath the artwork rather than baked
  * in. Baking the background colour here would reintroduce the frozen-pixel bug.
  *
- * The destination is drawn through whatever transform the caller established. Forcing identity
- * here would be wrong: under a nested replay the destination is the outer move's scratch,
- * which is deliberately translated. Top-level callers establish identity themselves.
+ * The destination is drawn through whatever transform the caller established, which is what
+ * keeps records composable. Top-level callers establish identity themselves.
  */
-function applyMove(ctx: CanvasRenderingContext2D, record: MoveRecord, rasterScale: number): void {
-  const { clip, dx, dy, records } = record;
-  if (records.length === 0) return;
-
-  const { canvas, ctx: scratchCtx } = borrowScratch(clip.width, clip.height);
-  try {
-    scratchCtx.save();
-    try {
-      // Draw the nested records at their ORIGINAL coordinates, shifted so the clip's top-left
-      // lands at the origin. Anything outside is cut off by the canvas edge.
-      scratchCtx.setTransform(1, 0, 0, 1, -clip.x, -clip.y);
-      for (const nested of records) applyRecord(scratchCtx, nested, rasterScale);
-    } finally {
-      scratchCtx.restore();
-    }
-  } finally {
-    scratchDepth--;
-  }
+function applyMove(ctx: CanvasRenderingContext2D, record: MoveRecord): void {
+  const { clip, dx, dy, image } = record;
+  const bitmap = moveBitmaps.get(image);
+  if (!bitmap) return;
 
   ctx.save();
   try {
     ctx.clearRect(clip.x, clip.y, clip.width, clip.height);
     // Smoothing off: at integer offsets this is a straight pixel copy, and leaving it on
-    // would resample and soften the anti-aliased edge the move was supposed to preserve.
+    // would resample and soften the anti-aliased edge the move was meant to preserve.
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(canvas, clip.x + dx, clip.y + dy);
+    ctx.drawImage(bitmap, clip.x + dx, clip.y + dy);
     ctx.imageSmoothingEnabled = true;
   } finally {
     ctx.restore();
   }
 }
 
-/**
- * Apply any record to a raster context.
- *
- * **Requires an identity transform.** Records are drawn through the destination's current
- * matrix, which is what lets a nested replay inside a move's translated scratch land in the
- * right place. Every top-level caller — `repaintBase` and `paintRecord` — establishes identity
- * before calling, which is where the ghost-pixel protection actually lives; forcing identity
- * here instead would be wrong the moment records nest.
- */
 export function applyRecord(
   ctx: CanvasRenderingContext2D,
   record: PaintRecord,
@@ -408,7 +312,7 @@ export function applyRecord(
     return;
   }
   if (record.kind === "move") {
-    applyMove(ctx, record, rasterScale);
+    applyMove(ctx, record);
     return;
   }
   renderRecord(ctx, record, rasterScale);

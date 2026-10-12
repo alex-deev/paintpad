@@ -30,8 +30,9 @@ import {
   CLICK_TOOLS,
   FREEHAND_TOOLS,
   isShapeTool,
-  recordsForMove,
+  registerMoveBitmap,
   renderRecord,
+  type MoveRecord,
   type PaintRecord,
   type ShapeRecord,
   type StrokeRecord,
@@ -375,6 +376,37 @@ export class Engine {
     if (leavingSelect) this.clearSelection();
     this.emit();
     this.applyCursor();
+  }
+
+  /**
+   * Capture the selected region and describe moving it.
+   *
+   * The pixels are snapshotted from the base *now* rather than re-derived on replay. Replay is
+   * synchronous and PNG decoding is not, so the snapshot is also registered as the decoded
+   * bitmap — the canvas it was read from is already the right thing to draw.
+   */
+  private captureMove(clip: Rect, dx: number, dy: number): MoveRecord {
+    const snapshot = document.createElement("canvas");
+    snapshot.width = clip.width;
+    snapshot.height = clip.height;
+    const ctx = snapshot.getContext("2d", { colorSpace: "srgb" });
+    const base = this.base;
+    if (!ctx || !base) return { kind: "move", dx, dy, clip, image: "" };
+
+    ctx.drawImage(
+      base,
+      clip.x,
+      clip.y,
+      clip.width,
+      clip.height,
+      0,
+      0,
+      clip.width,
+      clip.height,
+    );
+    const image = snapshot.toDataURL("image/png");
+    registerMoveBitmap(image, snapshot);
+    return { kind: "move", dx, dy, clip, image };
   }
 
   /** Discard the selection without touching the document. */
@@ -976,13 +1008,7 @@ export class Engine {
         if (origin && clip && target && (target.x !== clip.x || target.y !== clip.y)) {
           const dx = target.x - clip.x;
           const dy = target.y - clip.y;
-          this.commit({
-            kind: "move",
-            records: recordsForMove(visibleEntries(this.history), clip, this.doc.rasterScale),
-            dx,
-            dy,
-            clip,
-          });
+          this.commit(this.captureMove(clip, dx, dy));
         } else {
           this.selection = clip;
         }

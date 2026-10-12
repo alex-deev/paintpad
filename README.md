@@ -89,10 +89,16 @@ rejected.
 
 ## Known limitations
 
-- **Selection moves and deletes, but there is no cut, copy, or paste yet.** A move stores the
-  records that produced the region and replays them at an offset, so history stays
-  JSON-serialisable. Pasting one selection inside another is the case that has to prove the
-  nesting depth is bounded.
+- **Selection moves and deletes, but there is no cut, copy, or paste yet.** A move carries its
+  region as a PNG data URL in the command log, so it costs the same whether it is the first
+  move or the fiftieth. An earlier design re-derived the region from the records that produced
+  it; that was exact but duplicated exponentially, and ten moves of one stroke grew the save to
+  1.3 MB.
+- **An occasional e2e failure reading "canvas.surface not found" is not yet root-caused.** It
+  appears roughly once every few full-suite runs, always at ~2 s, never in isolation, and is
+  accompanied by a blank page rather than a hidden element. A Vite dev-server module-load
+  failure has been observed directly in this setup and is the leading suspect. Failures of this
+  shape should not be treated as renderer regressions without checking for page errors first.
 - **Fills reach the wall of a freehand line.** Freehand strokes are antialiased, so the edge
   between the fill and the line is a ramp of partial-alpha pixels, and an exact colour match
   stops short of it. The fill absorbs that ramp, recolouring each pixel by its own coverage,
