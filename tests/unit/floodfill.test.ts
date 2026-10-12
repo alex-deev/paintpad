@@ -287,3 +287,164 @@ describe("floodFill — edge cases", () => {
     expect(Array.from(data)).toEqual(Array.from(snapshot));
   });
 });
+
+/**
+ * Penumbra absorption.
+ *
+ * Freehand strokes are antialiased, so the edge between the fill and the line is a ramp of
+ * partial-alpha pixels. An exact-match fill stops at the first of them, leaving a hairline
+ * between the fill and the wall. These pin the absorption that closes it.
+ */
+describe("floodFill — penumbra absorption", () => {
+  const pixelAt = (data: Uint8ClampedArray, w: number, x: number, y: number) =>
+    Array.from(data.slice(idx(w, x, y), idx(w, x, y) + 4));
+
+  /** blend(strokeRGB, fillRGB, a/255) — the documented coverage blend. */
+  const expected = (stroke: number, fill: number, a: number) =>
+    Math.round((stroke * a + fill * (255 - a)) / 255);
+
+  it("absorbs a fringe pixel adjacent to the fill, blended by its coverage", () => {
+    const w = 5;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128); // half-covered black stroke edge
+    set(data, w, 2, 0, 0, 0, 0, 255); // the solid line
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    expect(result.changed).toBe(1);
+    expect(result.absorbed).toBe(1);
+    // Blended 50/50 between the stroke and the fill, and now fully opaque.
+    expect(pixelAt(data, w, 1, 0)).toEqual([
+      expected(0, RED[0], 128),
+      expected(0, RED[1], 128),
+      expected(0, RED[2], 128),
+      255,
+    ]);
+  });
+
+  it("leaves the solid line at full strength", () => {
+    const w = 5;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128);
+    set(data, w, 2, 0, 0, 0, 0, 255);
+
+    floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    // Absorption stops at opaque pixels, so the outline keeps its full weight.
+    expect(pixelAt(data, w, 2, 0)).toEqual([0, 0, 0, 255]);
+  });
+
+  it("absorbs a whole multi-pixel ramp, not just the first layer", () => {
+    // Shallow-angle edges produce a ramp many pixels wide. One layer would leave it visible.
+    const w = 6;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 50);
+    set(data, w, 2, 0, 0, 0, 0, 120);
+    set(data, w, 3, 0, 0, 0, 0, 200);
+    set(data, w, 4, 0, 0, 0, 0, 255);
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    expect(result.absorbed).toBe(3);
+    for (const x of [1, 2, 3]) expect(alphaAt(data, w, x, 0)).toBe(255);
+    // Monotonically darker toward the solid line — the blend preserves the gradient.
+    expect(pixelAt(data, w, 1, 0)[0]).toBeGreaterThan(pixelAt(data, w, 2, 0)[0]!);
+    expect(pixelAt(data, w, 2, 0)[0]).toBeGreaterThan(pixelAt(data, w, 3, 0)[0]!);
+  });
+
+  it("does not leak into fully transparent canvas beyond the line", () => {
+    const w = 6;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128);
+    set(data, w, 2, 0, 0, 0, 0, 255);
+    // x=3 and x=4 are empty canvas, beyond the opaque line.
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    expect(result.absorbed).toBe(1);
+    expect(alphaAt(data, w, 3, 0)).toBe(0);
+    expect(alphaAt(data, w, 4, 0)).toBe(0);
+  });
+
+  it("does not reach a partial-alpha pixel that the fill never touched", () => {
+    // The fill is stopped at x=1, so the run at x=3 is behind an opaque pixel, not adjacent.
+    const w = 6;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128);
+    set(data, w, 2, 0, 0, 0, 0, 255);
+    set(data, w, 3, 0, 0, 0, 0, 200);
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    expect(result.absorbed).toBe(1);
+    expect(pixelAt(data, w, 3, 0)).toEqual([0, 0, 0, 200]);
+  });
+
+  it("grows the dirty bounds to cover absorbed pixels", () => {
+    const w = 5;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 90);
+    set(data, w, 2, 0, 0, 0, 0, 255);
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, options);
+
+    // Without absorption this would be {x:0, width:1}.
+    expect(result.bounds).toEqual({ x: 0, y: 0, width: 2, height: 1 });
+  });
+
+  it("absorbs in every direction from a 2D fill", () => {
+    const w = 3;
+    const h = 3;
+    const data = buffer(w, h);
+    // Ring of half-alpha pixels around a transparent centre.
+    for (const [x, y] of [[0, 1], [2, 1], [1, 0], [1, 2]]) set(data, w, x, y, 0, 0, 0, 128);
+
+    const result = floodFill(data, w, h, { x: 1, y: 1 }, RED, options);
+
+    expect(result.changed).toBe(1);
+    expect(result.absorbed).toBe(4);
+    for (const [x, y] of [[0, 1], [2, 1], [1, 0], [1, 2]]) {
+      expect(alphaAt(data, w, x, y)).toBe(255);
+    }
+    expect(result.bounds).toEqual({ x: 0, y: 0, width: 3, height: 3 });
+  });
+
+  it("absorbs in global mode too", () => {
+    // Restricting absorption to contiguous mode would fill the same drawing two different ways.
+    const w = 6;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128); // touches the fill at x=0 — absorb
+    set(data, w, 2, 0, 0, 0, 0, 255); // opaque line
+    set(data, w, 3, 0, 0, 0, 0, 200); // behind that line, never touches a fill — leave
+    set(data, w, 4, 0, 0, 0, 0, 255); // opaque line
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, RED, globalOptions);
+
+    expect(result.changed).toBe(2); // the transparent pixels at x=0 and x=5
+    expect(result.absorbed).toBe(1); // only x=1
+    expect(alphaAt(data, w, 1, 0)).toBe(255);
+    expect(pixelAt(data, w, 3, 0)).toEqual([0, 0, 0, 200]);
+  });
+
+  it("absorbs nothing when the fill matched no pixels", () => {
+    // Target already equals the fill colour: nothing changed, so there is no boundary to
+    // absorb against.
+    const w = 3;
+    const h = 1;
+    const data = buffer(w, h);
+    set(data, w, 1, 0, 0, 0, 0, 128);
+
+    const result = floodFill(data, w, h, { x: 0, y: 0 }, [0, 0, 0, 0], options);
+
+    expect(result.changed).toBe(0);
+    expect(result.absorbed).toBe(0);
+    expect(pixelAt(data, w, 1, 0)).toEqual([0, 0, 0, 128]);
+  });
+});

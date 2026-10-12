@@ -84,10 +84,10 @@ rejected.
 
 ## Known limitations
 
-- **Fills leave an antialiased fringe.** Strokes are antialiased, so a shape's boundary ring
-  is blended pixels rather than the interior colour, and an exact-match fill stops at that
-  ring. This is Paint's behaviour. Tolerance does not fix it — a half-alpha edge pixel and a
-  transparent one differ by far more than any usable tolerance.
+- **Fills reach the wall of a freehand line.** Freehand strokes are antialiased, so the edge
+  between the fill and the line is a ramp of partial-alpha pixels, and an exact colour match
+  stops short of it. The fill absorbs that ramp, recolouring each pixel by its own coverage,
+  so the outline keeps its weight and the edge stays antialiased.
 - **Screenshot goldens cannot verify alpha.** Playwright's image comparison treats fully
   transparent pixels as "don't care". The goldens verify strokes; transparency is asserted
   directly on the alpha channel in `e2e/transparency.spec.ts`.

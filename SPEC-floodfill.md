@@ -42,15 +42,57 @@ The engine wraps it with `getImageData`/`putImageData`.
 Matching compares **all four channels including alpha**. Without that, opaque black
 `(0,0,0,255)` would match transparent `(0,0,0,0)` and every fill would leak.
 
-## The Antialiased Fringe — Accepted, Not Solved
+## The Antialiased Fringe — Solved by Penumbra Absorption
 
-Strokes are antialiased, so the boundary ring of a shape is *blended* pixels rather than the
-interior colour. An exact-match fill stops at that ring, leaving a hairline halo. That is
-Paint's behaviour and it is predictable.
+### Correction to the original analysis
 
-Tolerance does **not** fix it: a half-alpha edge pixel and a transparent pixel differ by far
-more than any useful tolerance. Properly removing a fringe needs a post-pass that re-colours
-edge pixels adjacent to the filled region — a different feature, deliberately not here.
+An earlier draft of this spec claimed "the boundary ring of a shape is blended pixels" and
+blamed shapes generally. **Measurement contradicts that.** Filling a rectangle or ellipse
+leaves **zero** partial-alpha pixels touching the fill — Canvas stroke edges land on pixel
+boundaries along straight runs, and the only partial alpha is on the *outside* of corner
+miters, where it is not visible against the fill.
+
+Filling a **freehand pencil loop** leaves **902** partial-alpha pixels adjacent to the fill,
+forming a continuous ramp (`a=22, 25, 28, 31 … 57`, all pure black). That is the antialiased
+edge of the stroke sitting between the fill and the solid line, and it is the hairline users
+actually see. Freehand is how people enclose an area, so this is the common case.
+
+Tolerance does not help: a fringe pixel with `a=22` is 22 away from its transparent target,
+and so is every genuinely different colour.
+
+### The fix
+
+Absorb the penumbra — the connected run of partial-alpha pixels touching the fill — and
+recolour each one toward the fill colour **by its own coverage**:
+
+```
+result = strokeRGB · (a/255) + fillRGB · ((255-a)/255),  alpha := 255
+```
+
+At full opacity, because both neighbours are now opaque: `a=22` becomes bright pink, `a=253`
+becomes near-black. The outline keeps its full visual weight and the edge stays antialiased.
+
+| Option | Rejected because |
+|---|---|
+| Force every fringe pixel to the solid fill colour | Crispest, but eats ~1px of the outline — a 1px line visibly thins |
+| Raise the tolerance | Useless here; see above |
+| Accept the hairline | Freehand loops are how areas get enclosed, so this is the common path |
+| Absorb one pixel layer | Shallow-angle edges produce a many-pixel ramp; the line would survive, faintly |
+
+### Locked decisions
+
+| # | Decision | Reason |
+|---|----------|--------|
+| 1 | Absorption runs inside `floodFill`, not as an engine post-pass | The record stores parameters and replay re-runs the fill, so the effect must be deterministic and re-derived |
+| 2 | Blend in **sRGB**, unweighted | ImageData is non-premultiplied; linear-light blending would darken mid-coverage pixels relative to the browser's own AA |
+| 3 | Output alpha is **255**, not the original `a` | Both neighbours are opaque, so a translucent result would be a visible seam against both |
+| 4 | The penumbra is explored through partial-alpha pixels only, stopping at opaque ones | Self-limiting by construction: it cannot leak into transparent canvas or across a solid line |
+| 5 | One mask, three states (`0` untouched, `1` filled, `2` absorbed) | Avoids a second raster-sized allocation per fill |
+| 6 | Global mode absorbs too | The penumbra exists wherever a fill meets an antialiased edge; restricting it to contiguous mode would make the same drawing fill two different ways |
+
+The `3`-state mask costs one raster-sized byte array per fill, replacing what would otherwise
+be a separate mask plus a second one for absorption. It is transient — allocated inside
+`floodFill` and released on return.
 
 ## Implementation
 

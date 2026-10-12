@@ -14,6 +14,12 @@
  *
  * Colour matching includes **alpha**. Opaque black `(0,0,0,255)` and transparent
  * `(0,0,0,0)` share RGB channels; ignoring alpha would make every fill leak.
+ *
+ * A third behaviour, also review-driven: **penumbra absorption**. Freehand strokes are
+ * antialiased, so the edge between the fill and the line is a ramp of partial-alpha pixels.
+ * An exact-match fill stops at the first of them and leaves a hairline short of the wall.
+ * The connected run of partial-alpha pixels touching the fill is absorbed and recoloured
+ * toward the fill by each pixel's own coverage. See `absorbPenumbra`.
  */
 
 export interface FillOptions {
@@ -31,9 +37,11 @@ export interface Bounds {
 }
 
 export interface FillResult {
-  /** How many pixels were replaced. */
+  /** How many pixels the fill itself replaced. */
   readonly changed: number;
-  /** The dirty rectangle, or null when nothing changed. */
+  /** How many antialiased edge pixels were absorbed into the fill. See `absorbPenumbra`. */
+  readonly absorbed: number;
+  /** The dirty rectangle, or null when nothing changed. Covers absorbed pixels too. */
   readonly bounds: Bounds | null;
 }
 
@@ -41,7 +49,23 @@ export type Rgba = readonly [number, number, number, number];
 
 export const DEFAULT_FILL_OPTIONS: FillOptions = { contiguous: true, tolerance: 0 };
 
-const EMPTY: FillResult = { changed: 0, bounds: null };
+const EMPTY: FillResult = { changed: 0, absorbed: 0, bounds: null };
+
+/**
+ * Per-pixel state for one fill. Three states in a single raster-sized array, so absorption
+ * does not need a second allocation.
+ */
+const UNTOUCHED = 0;
+const FILLED = 1;
+const ABSORBED = 2;
+
+/** A mutable version of `Bounds` that absorption can grow in place. */
+interface DirtyBox {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
 
 function matchesPixel(
   data: Uint8ClampedArray,
@@ -58,12 +82,7 @@ function matchesPixel(
 }
 
 /** Replace every pixel in a bounds rect, tracking the dirty region as we go. */
-function fillBounds(): {
-  minX: number;
-  minY: number;
-  maxX: number;
-  maxY: number;
-} {
+function fillBounds(): DirtyBox {
   return { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: -1, maxY: -1 };
 }
 
@@ -77,8 +96,103 @@ function toBounds(box: ReturnType<typeof fillBounds>): Bounds {
   };
 }
 
+/**
+ * Absorb the antialiased edge between the fill and the artwork it was filled against.
+ *
+ * Every partial-alpha pixel (`0 < a < 255`) 4-connected to a filled pixel is recoloured to
+ * the stroke/fill blend at that pixel's coverage and made opaque:
+ *
+ *     out = stroke · (a/255) + fill · ((255-a)/255),   alpha := 255
+ *
+ * Opaque, because both neighbours are now opaque — leaving it translucent would show as a
+ * seam against the fill on one side and the line on the other. Blended rather than forced to
+ * the solid fill colour, which would eat ~1px of the outline and visibly thin a 1px line.
+ *
+ * The walk stops at opaque pixels and never enters fully transparent ones, which bounds it
+ * to the fill's own edge: it cannot leak across a solid line or into empty canvas.
+ *
+ * Blending is done in sRGB rather than linear light because `ImageData` is non-premultiplied
+ * sRGB, and this is the same blend the browser's own antialiasing performed to produce the
+ * pixel in the first place.
+ *
+ * Returns how many pixels were absorbed.
+ */
+function absorbPenumbra(
+  data: Uint8ClampedArray,
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  replacement: Rgba,
+  box: DirtyBox,
+): number {
+  const queue: number[] = [];
+
+  // Seed from the fill's boundary: every partial-alpha pixel touching a filled pixel. This
+  // needs one raster-sized pass, which is the same order as the fill itself and is bounded
+  // by the getImageData the caller already did.
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * width;
+    for (let x = 0; x < width; x++) {
+      const index = rowStart + x;
+      if (mask[index] !== UNTOUCHED) continue;
+      const alpha = data[index * 4 + 3]!;
+      if (alpha === 0 || alpha === 255) continue;
+      // 4-connected only, matching the fill's own connectivity.
+      const touchesFill =
+        (x > 0 && mask[index - 1] === FILLED) ||
+        (x < width - 1 && mask[index + 1] === FILLED) ||
+        (y > 0 && mask[index - width] === FILLED) ||
+        (y < height - 1 && mask[index + width] === FILLED);
+      if (!touchesFill) continue;
+      mask[index] = ABSORBED;
+      queue.push(index);
+    }
+  }
+
+  let absorbed = 0;
+  while (queue.length > 0) {
+    const index = queue.pop()!;
+    const x = index % width;
+    const y = (index / width) | 0;
+    const offset = index * 4;
+    const alpha = data[offset + 3]!;
+    const coverage = alpha / 255;
+    const inverse = 1 - coverage;
+
+    data[offset] = data[offset]! * coverage + replacement[0] * inverse;
+    data[offset + 1] = data[offset + 1]! * coverage + replacement[1] * inverse;
+    data[offset + 2] = data[offset + 2]! * coverage + replacement[2] * inverse;
+    data[offset + 3] = 255;
+
+    if (x < box.minX) box.minX = x;
+    if (x > box.maxX) box.maxX = x;
+    if (y < box.minY) box.minY = y;
+    if (y > box.maxY) box.maxY = y;
+    absorbed++;
+
+    // Continue the run outward. The pixel is now opaque, so this terminates on its own at
+    // the solid line, but the guard keeps a malformed mask from looping.
+    for (const neighbour of [
+      x > 0 ? index - 1 : -1,
+      x < width - 1 ? index + 1 : -1,
+      y > 0 ? index - width : -1,
+      y < height - 1 ? index + width : -1,
+    ]) {
+      if (neighbour < 0) continue;
+      if (mask[neighbour] !== UNTOUCHED) continue;
+      const neighbourAlpha = data[neighbour * 4 + 3]!;
+      if (neighbourAlpha === 0 || neighbourAlpha === 255) continue;
+      mask[neighbour] = ABSORBED;
+      queue.push(neighbour);
+    }
+  }
+
+  return absorbed;
+}
+
 function fillGlobal(
   data: Uint8ClampedArray,
+  mask: Uint8Array,
   width: number,
   height: number,
   target: Rgba,
@@ -89,13 +203,15 @@ function fillGlobal(
   let changed = 0;
 
   for (let y = 0; y < height; y++) {
+    const rowStart = y * width;
     for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * 4;
+      const offset = (rowStart + x) * 4;
       if (!matchesPixel(data, offset, target, tolerance)) continue;
       data[offset] = replacement[0];
       data[offset + 1] = replacement[1];
       data[offset + 2] = replacement[2];
       data[offset + 3] = replacement[3];
+      mask[rowStart + x] = FILLED;
       if (x < box.minX) box.minX = x;
       if (x > box.maxX) box.maxX = x;
       if (y < box.minY) box.minY = y;
@@ -106,7 +222,8 @@ function fillGlobal(
 
   // `changed` is always at least 1 here: the seed pixel is the source of `target`, so it
   // necessarily matches itself.
-  return { changed, bounds: toBounds(box) };
+  const absorbed = absorbPenumbra(data, mask, width, height, replacement, box);
+  return { changed, absorbed, bounds: toBounds(box) };
 }
 
 /**
@@ -147,14 +264,16 @@ export function floodFill(
     return EMPTY;
   }
 
+  // One raster-sized mask, three states, shared by the fill and the absorption pass.
+  const mask = new Uint8Array(width * height);
+
   if (!options.contiguous) {
-    return fillGlobal(data, width, height, target, replacement, options.tolerance);
+    return fillGlobal(data, mask, width, height, target, replacement, options.tolerance);
   }
 
   const box = fillBounds();
-  // `visited` is required: once a pixel is filled it no longer matches the target, so it
+  // The mask is required: once a pixel is filled it no longer matches the target, so it
   // would otherwise be re-scanned from a neighbouring span.
-  const visited = new Uint8Array(width * height);
   const stack: number[] = [seedX, seedY];
   let changed = 0;
 
@@ -165,23 +284,23 @@ export function floodFill(
 
     // The three guards around this loop are defence in depth and are unreachable given the
     // algorithm's invariants: a pixel is only pushed when it is unvisited and matching, and
-    // filling is the only thing that changes a pixel or sets `visited`. They stay because
+    // filling is the only thing that changes a pixel or sets the mask. They stay because
     // violating that invariant would otherwise corrupt pixels silently — a far worse
     // failure than a branch that is simply never taken.
     /* c8 ignore start */
     if (y < 0 || y >= height) continue;
-    if (visited[rowStart + x] === 1) continue;
+    if (mask[rowStart + x] === FILLED) continue;
     if (!matchesPixel(data, (rowStart + x) * 4, target, options.tolerance)) continue;
     /* c8 ignore stop */
 
-  // Expand to the full horizontal run containing this pixel.
-  let left = x;
-    while (left > 0 && visited[rowStart + left - 1] === 0 &&
+    // Expand to the full horizontal run containing this pixel.
+    let left = x;
+    while (left > 0 && mask[rowStart + left - 1] === UNTOUCHED &&
       matchesPixel(data, (rowStart + left - 1) * 4, target, options.tolerance)) {
       left--;
     }
     let right = x;
-    while (right < width - 1 && visited[rowStart + right + 1] === 0 &&
+    while (right < width - 1 && mask[rowStart + right + 1] === UNTOUCHED &&
       matchesPixel(data, (rowStart + right + 1) * 4, target, options.tolerance)) {
       right++;
     }
@@ -192,7 +311,7 @@ export function floodFill(
       data[offset + 1] = replacement[1];
       data[offset + 2] = replacement[2];
       data[offset + 3] = replacement[3];
-      visited[rowStart + px] = 1;
+      mask[rowStart + px] = FILLED;
       changed++;
     }
 
@@ -214,7 +333,7 @@ export function floodFill(
       while (px <= right) {
         const offset = (neighbourRow + px) * 4;
         if (
-          visited[neighbourRow + px] === 1 ||
+          mask[neighbourRow + px] === FILLED ||
           !matchesPixel(data, offset, target, options.tolerance)
         ) {
           px++;
@@ -224,7 +343,7 @@ export function floodFill(
         // Skip the rest of this run — it is picked up whole when the seed is expanded.
         while (
           px <= right &&
-          visited[neighbourRow + px] === 0 &&
+          mask[neighbourRow + px] === UNTOUCHED &&
           matchesPixel(data, (neighbourRow + px) * 4, target, options.tolerance)
         ) {
           px++;
@@ -233,5 +352,6 @@ export function floodFill(
     }
   }
 
-  return { changed, bounds: toBounds(box) };
+  const absorbed = absorbPenumbra(data, mask, width, height, replacement, box);
+  return { changed, absorbed, bounds: toBounds(box) };
 }

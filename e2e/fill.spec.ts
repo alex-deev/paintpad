@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { canvasLocator, clearCanvas, dragShape, setTool, setWidth } from "./helpers";
+import { canvasLocator, clearCanvas, dragShape, drawStroke, setTool, setWidth } from "./helpers";
 
 /**
  * Flood fill verification.
@@ -189,6 +189,97 @@ test("the fill-mode toggle is disabled unless the bucket is selected", async ({ 
   await expect(page.getByTestId("fill-mode")).toBeDisabled();
   await setTool(page, "fill");
   await expect(page.getByTestId("fill-mode")).toBeEnabled();
+});
+
+/**
+ * Count partial-alpha pixels 4-adjacent to a pixel of `fillRgb`.
+ *
+ * These are the antialiased ramp between a fill and the line it was filled against. Every one
+ * of them is a visible hairline between the fill colour and the wall.
+ */
+async function countAdjacentFringe(
+  page: Page,
+  [fr, fg, fb, fa]: number[],
+): Promise<number> {
+  return page.evaluate(
+    async ({ fr, fg, fb, fa }) => {
+      const img = new Image();
+      img.src = window.__paintpad.snapshotDataUrl()!;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const cx = c.getContext("2d")!;
+      cx.drawImage(img, 0, 0);
+      const d = cx.getImageData(0, 0, c.width, c.height).data;
+      const W = c.width;
+      const H = c.height;
+      const at = (x: number, y: number) => (y * W + x) * 4;
+      const isFill = (x: number, y: number) => {
+        const i = at(x, y);
+        return d[i] === fr && d[i + 1] === fg && d[i + 2] === fb && d[i + 3] === fa;
+      };
+
+      let count = 0;
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const a = d[at(x, y) + 3]!;
+          if (a === 0 || a === 255) continue;
+          if (isFill(x - 1, y) || isFill(x + 1, y) || isFill(x, y - 1) || isFill(x, y + 1)) {
+            count++;
+          }
+        }
+      }
+      return count;
+    },
+    { fr, fg, fb, fa },
+  );
+}
+
+/** A closed loop drawn freehand, which is how a person actually encloses an area. */
+async function freehandLoop(page: Page) {
+  await setTool(page, "pencil");
+  await setWidth(page, 6);
+  await pickColour(page, "#000000");
+  await drawStroke(page, { x: 240, y: 180 }, { x: 400, y: 182 }, { steps: 12 });
+  await drawStroke(page, { x: 400, y: 182 }, { x: 402, y: 340 }, { steps: 12 });
+  await drawStroke(page, { x: 402, y: 340 }, { x: 240, y: 342 }, { steps: 12 });
+  await drawStroke(page, { x: 240, y: 342 }, { x: 240, y: 180 }, { steps: 12 });
+}
+
+test("a fill reaches the wall of a freehand loop, leaving no antialiased fringe", async ({ page }) => {
+  // The reported defect. A shape tool already fills flush — but a freehand stroke is
+  // antialiased all the way round, so exact matching stops at the first partial-alpha pixel
+  // and leaves a hairline between the fill and the line.
+  await freehandLoop(page);
+  await setTool(page, "fill");
+  await pickColour(page, "#f72585");
+  await fillAt(page, 320, 260);
+
+  expect(await ink(page)).toBeGreaterThan(20_000);
+  expect(await countAdjacentFringe(page, [247, 37, 133, 255])).toBe(0);
+});
+
+test("undo of a fill that absorbed a fringe restores the document exactly", async ({ page }) => {
+  // Absorption rewrites pixels the fill itself never selected. Because a fill record stores
+  // only parameters, undo re-runs the whole thing against the reconstructed artwork — so the
+  // absorbed ramp has to come back identically or undo leaves residue along the whole loop.
+  await freehandLoop(page);
+  const before = await pixels(page);
+
+  await setTool(page, "fill");
+  await pickColour(page, "#f72585");
+  await fillAt(page, 320, 260);
+  const after = await pixels(page);
+  expect(after).not.toBe(before);
+
+  await page.evaluate(() => window.__paintpad.undo());
+  await page.waitForTimeout(200);
+  expect(await pixels(page)).toBe(before);
+
+  await page.evaluate(() => window.__paintpad.redo());
+  await page.waitForTimeout(200);
+  expect(await pixels(page)).toBe(after);
 });
 
 test("a fill survives a zoom round trip", async ({ page }) => {
