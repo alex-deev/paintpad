@@ -7,17 +7,31 @@
  * to implement undo; keeping them honest now is what makes that replay byte-exact.
  */
 
+import { normalizeHex, parseHex } from "./color";
 import { clampStrokeWidth } from "./document";
+import { floodFill } from "./floodfill";
 import { isDegenerate, shapeBounds, type ShapeKind } from "./shape";
 import { strokeToOps, type DrawOp, type Pt } from "./stroke";
 
-export type ToolId = "pencil" | "eraser" | "line" | "rect" | "ellipse";
+/**
+ * Exact colour matching. Tolerance is available in `floodFill` and tested there, but is not
+ * exposed: a tolerance slider leaks through thin lines, and exact match is what Paint does.
+ *
+ * Tolerance would not fix the antialiased fringe anyway — a half-alpha edge pixel and a
+ * transparent one differ by far more than any usable tolerance.
+ */
+const FILL_TOLERANCE = 0;
+
+export type ToolId = "pencil" | "eraser" | "line" | "rect" | "ellipse" | "fill";
 
 /** Tools that accumulate freehand input points rather than dragging an anchor. */
 export const FREEHAND_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["pencil", "eraser"]);
 
 /** Tools that drag from an anchor to a live endpoint. */
 export const SHAPE_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["line", "rect", "ellipse"]);
+
+/** Tools that act once on click, with no drag: the bucket. */
+export const CLICK_TOOLS: ReadonlySet<ToolId> = new Set<ToolId>(["fill"]);
 
 export function isShapeTool(tool: ToolId): tool is ShapeKind {
   return SHAPE_TOOLS.has(tool);
@@ -44,11 +58,28 @@ export interface StrokeRecord {
   readonly points: readonly Pt[];
 }
 
+/**
+ * A flood fill.
+ *
+ * Stores PARAMETERS, not the pixels it changed. Replay re-runs the fill against the
+ * reconstructed artwork, which is deterministic and — critically — keeps history JSON-safe.
+ * Storing the changed `ImageData` would look simpler but `JSON.stringify` silently
+ * destroys it, producing an autosave whose undo wipes the document.
+ */
+export interface FillRecord {
+  readonly kind: "fill";
+  /** Resolved fill colour, baked at commit time so a later palette change cannot affect it. */
+  readonly colour: string;
+  /** Seed in raster coordinates. The matched colour is sampled from the canvas at replay. */
+  readonly seed: Pt;
+  readonly contiguous: boolean;
+}
+
 /** The union of everything that can appear in history.
  *
  *  Named `PaintRecord` rather than `Record` so it never shadows TypeScript's built-in
  *  `Record<K, V>` utility type in this module's consumers. */
-export type PaintRecord = StrokeRecord | ShapeRecord;
+export type PaintRecord = StrokeRecord | ShapeRecord | FillRecord;
 
 export interface ShapeRecord {
   readonly kind: "shape";
@@ -144,6 +175,51 @@ function renderShape(ctx: CanvasRenderingContext2D, record: ShapeRecord, rasterS
 }
 
 /**
+ * Apply any record to a raster context.
+ *
+ * Strokes and shapes draw; fills read and write pixels, so they need their own path. Routing
+ * everything through one entry point keeps the engine from needing to know which is which.
+ */
+export function applyRecord(
+  ctx: CanvasRenderingContext2D,
+  record: PaintRecord,
+  rasterScale: number,
+): void {
+  if (record.kind === "fill") {
+    applyFill(ctx, record);
+    return;
+  }
+  renderRecord(ctx, record, rasterScale);
+}
+
+/**
+ * Run a fill against the raster.
+ *
+ * Only the dirty rect is written back — a full `putImageData` would push the entire
+ * 15 MB buffer on every fill.
+ */
+function applyFill(ctx: CanvasRenderingContext2D, record: FillRecord): void {
+  const { width, height } = ctx.canvas;
+  const seedX = Math.round(record.seed.x);
+  const seedY = Math.round(record.seed.y);
+  if (seedX < 0 || seedY < 0 || seedX >= width || seedY >= height) return;
+
+  const colour = normalizeHex(record.colour);
+  if (!colour) return;
+  const { r, g, b } = parseHex(colour);
+
+  const image = ctx.getImageData(0, 0, width, height);
+  const result = floodFill(image.data, width, height, { x: seedX, y: seedY }, [r, g, b, 255], {
+    contiguous: record.contiguous,
+    tolerance: FILL_TOLERANCE,
+  });
+  if (!result.bounds) return;
+
+  const { x, y, width: w, height: h } = result.bounds;
+  ctx.putImageData(image, 0, 0, x, y, w, h);
+}
+
+/**
  * Draw any record onto `ctx`. Self-contained: sets all state it reads.
  *
  * `rasterScale` converts the record's logical width into backing-store units. The record
@@ -164,6 +240,7 @@ export function renderRecord(
       renderShape(ctx, record, rasterScale);
       return;
     }
+    if (record.kind === "fill") return; // pixels, not paths — use applyRecord
     const ops = strokeToOps(record.points, record.width);
     if (ops.length === 0) return;
 

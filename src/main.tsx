@@ -13,6 +13,7 @@ const TOOLS: { id: ToolId; key: string }[] = [
   { id: "line", key: "3" },
   { id: "rect", key: "4" },
   { id: "ellipse", key: "5" },
+  { id: "fill", key: "6" },
 ];
 
 const RECENTS_KEY = "paintpad.recents";
@@ -152,6 +153,17 @@ function App() {
           disabled={settings.tool === "pencil" || settings.tool === "eraser"}
         >
           Fill
+        </button>
+
+        <button
+          type="button"
+          data-testid="fill-mode"
+          aria-pressed={settings.fillContiguous}
+          onClick={() => engine.setFillContiguous(!settings.fillContiguous)}
+          title="Bucket: fill the connected region, or every matching pixel"
+          disabled={settings.tool !== "fill"}
+        >
+          {settings.fillContiguous ? "Contiguous" : "Global"}
         </button>
 
         <div className="group">

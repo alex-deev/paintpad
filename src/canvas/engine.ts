@@ -26,6 +26,8 @@ import {
   type History,
 } from "./history";
 import {
+  applyRecord,
+  CLICK_TOOLS,
   FREEHAND_TOOLS,
   isShapeTool,
   renderRecord,
@@ -107,6 +109,7 @@ export interface EngineSettings {
   readonly canRedo: boolean;
   readonly recordCount: number;
   readonly fillShapes: boolean;
+  readonly fillContiguous: boolean;
 }
 
 export class Engine {
@@ -144,6 +147,7 @@ export class Engine {
     canRedo: false,
     recordCount: 0,
     fillShapes: false,
+    fillContiguous: true,
   };
   private activePointerId: number | null = null;
   private panPointerId: number | null = null;
@@ -153,6 +157,7 @@ export class Engine {
   private anchor: Pt | null = null;
   private constrain = false;
   private fillShapes = false;
+  private fillContiguous = true;
   /** Once the user zooms, stop auto-fitting on stage resize. */
   private userAdjustedZoom = false;
   private frame: number | null = null;
@@ -334,6 +339,7 @@ export class Engine {
       canRedo: historyCanRedo(this.history),
       recordCount: this.history.entries.length,
       fillShapes: this.fillShapes,
+      fillContiguous: this.fillContiguous,
     };
   }
 
@@ -401,6 +407,13 @@ export class Engine {
   setFillShapes(fill: boolean): void {
     if (this.fillShapes === fill) return;
     this.fillShapes = fill;
+    this.emit();
+  }
+
+  /** Contiguous fills only the region connected to the click; global fills every match. */
+  setFillContiguous(contiguous: boolean): void {
+    if (this.fillContiguous === contiguous) return;
+    this.fillContiguous = contiguous;
     this.emit();
   }
 
@@ -573,7 +586,7 @@ export class Engine {
     ctx.save();
     try {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      renderRecord(ctx, record, this.doc.rasterScale);
+      applyRecord(ctx, record, this.doc.rasterScale);
     } finally {
       ctx.restore();
     }
@@ -598,7 +611,7 @@ export class Engine {
       // background shows through, now and after any later background change.
       ctx.clearRect(0, 0, base.width, base.height);
       for (const record of visibleEntries(this.history)) {
-        renderRecord(ctx, record, this.doc.rasterScale);
+        applyRecord(ctx, record, this.doc.rasterScale);
       }
     } finally {
       ctx.restore();
@@ -680,6 +693,14 @@ export class Engine {
     const point = this.toRaster(event);
     if (!point) return;
 
+    // The bucket acts on release, not press. Filling on press would mutate the base raster
+    // before its record is committed, breaking the invariant that the canvas is always
+    // derived from history.
+    if (CLICK_TOOLS.has(this.tool)) {
+      this.anchor = point;
+      return;
+    }
+
     if (isShapeTool(this.tool)) {
       this.anchor = point;
       this.current = this.buildShape(point, point);
@@ -746,6 +767,23 @@ export class Engine {
   }
 
   private endGesture(): void {
+    // The bucket computes and commits here, on release.
+    if (CLICK_TOOLS.has(this.tool)) {
+      const seed = this.anchor;
+      this.anchor = null;
+      this.activePointerId = null;
+      if (seed) {
+        this.commit({
+          kind: "fill",
+          colour: this.foreground,
+          seed,
+          contiguous: this.fillContiguous,
+        });
+      }
+      this.requestRender();
+      return;
+    }
+
     const record = this.current;
     this.current = null;
     this.anchor = null;

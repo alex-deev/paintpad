@@ -39,7 +39,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 
 | | |
 |---|---|
-| Tools | `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse |
+| Tools | `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse · `6` bucket |
 | Size | `[` / `]`, or the slider |
 | Colours | Palette, native picker, or a hex value. Click a swatch to target it, `X` or ⇄ to swap |
 | Undo / redo | `Ctrl+Z` · `Ctrl+Shift+Z` or `Ctrl+Y` |
@@ -47,6 +47,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 | Pan | Space-drag, or middle-drag |
 | Constrain | Hold `Shift` — 45° lines, square rectangles, circular ellipses |
 | Transparency | `∅` clears the canvas background |
+| Bucket scope | The toggle beside the tools — `Contiguous` fills the connected region, `Global` every matching pixel |
 
 The canvas opens **transparent**. Set a background from the second swatch and the eraser
 restores it; leave it unset and erasing produces real transparency, which PNG export
@@ -67,6 +68,11 @@ Consequences worth knowing:
 - **Backgrounds are composited, not baked.** `base` holds artwork only. An erased region
   contains no pixels at all, so changing the background repaints it — baking the background
   in would freeze erased areas at whatever colour they were erased against.
+- **Fills store parameters, not pixels.** A fill record holds `{seed, colour, contiguous}`
+  and replay re-runs it, so history stays JSON-serialisable. The scanline fill in
+  `floodfill.ts` is iterative rather than recursive and 4-connected: recursion overflows the
+  stack on a large flat region, and 8-connectivity lets a fill escape through a diagonal
+  corner in a border.
 - **`devicePixelRatio` affects display only.** The backing store is always logical size × a
   fixed raster scale, so exported files are identical regardless of the monitor.
 - **Determinism is scoped.** Replay is byte-exact within a session and across reloads on
@@ -78,6 +84,10 @@ rejected.
 
 ## Known limitations
 
+- **Fills leave an antialiased fringe.** Strokes are antialiased, so a shape's boundary ring
+  is blended pixels rather than the interior colour, and an exact-match fill stops at that
+  ring. This is Paint's behaviour. Tolerance does not fix it — a half-alpha edge pixel and a
+  transparent one differ by far more than any usable tolerance.
 - **Screenshot goldens cannot verify alpha.** Playwright's image comparison treats fully
   transparent pixels as "don't care". The goldens verify strokes; transparency is asserted
   directly on the alpha channel in `e2e/transparency.spec.ts`.

@@ -19,6 +19,7 @@ export default defineConfig({
       include: [
         "src/canvas/color.ts",
         "src/canvas/document.ts",
+        "src/canvas/floodfill.ts",
         "src/canvas/history.ts",
         "src/canvas/shape.ts",
         "src/canvas/stroke.ts",

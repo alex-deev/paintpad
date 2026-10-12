@@ -131,13 +131,17 @@ export function canvasLocator(page: Page): Locator {
 }
 
 /**
- * Capture the composited canvas pixels as a PNG buffer.
+ * Capture the COMPOSITED view pixels as a PNG buffer.
  *
  * We deliberately golden the canvas bitmap rather than an element screenshot. The canvas is
  * 720px tall inside a shorter stage, so `overflow: hidden` clips it and an element
- * screenshot captures whatever page chrome overlaps the bounding box instead. Snapshotting
- * the bitmap also makes goldens independent of page layout and of `devicePixelRatio`, which
- * is what we actually want to regress on.
+ * screenshot captures whatever page chrome overlaps the bounding box instead.
+ *
+ * Prefer `documentPixels` for anything about how strokes render. This reads the *view*, which
+ * is composited at the current zoom, so at fit-to-stage its size tracks the stage
+ * measurement — widening the toolbar resizes the bitmap and fails the snapshot without the
+ * renderer having changed. It is the right tool only for defects that live in the
+ * compositing or the alpha channel, where the document raster shows nothing.
  */
 export async function canvasPixels(page: Page): Promise<Buffer> {
   const dataUrl = await page.evaluate(() => {
@@ -147,7 +151,13 @@ export async function canvasPixels(page: Page): Promise<Buffer> {
   return Buffer.from(dataUrl.split(",")[1]!, "base64");
 }
 
-/** Committed document pixels (base layer), unaffected by zoom or DPR. */
+/**
+ * Committed document pixels — the artwork-only base raster.
+ *
+ * Fixed size, independent of zoom, `devicePixelRatio`, and page layout, so this is the
+ * stable target for renderer goldens. Note that Playwright treats fully transparent pixels
+ * as "don't care", so this cannot verify alpha; assert alpha directly instead.
+ */
 export async function documentPixels(page: Page): Promise<Buffer> {
   const dataUrl = await page.evaluate(() => window.__paintpad.snapshotDataUrl());
   return Buffer.from((dataUrl ?? "").split(",")[1] ?? "", "base64");
