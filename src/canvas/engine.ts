@@ -172,6 +172,13 @@ export class Engine {
   /** Where a move gesture started, and the region it is carrying. */
   private moveOrigin: Pt | null = null;
   private moveClip: Rect | null = null;
+  /**
+   * The copied region.
+   *
+   * Session state on purpose: a clipboard is not part of the document, so it is not a record,
+   * is not undoable, and is not autosaved. A reload simply starts with an empty clipboard.
+   */
+  private clipboard: { clip: Rect; image: string } | null = null;
   private constrain = false;
   private fillShapes = false;
   private fillContiguous = true;
@@ -386,27 +393,89 @@ export class Engine {
    * bitmap — the canvas it was read from is already the right thing to draw.
    */
   private captureMove(clip: Rect, dx: number, dy: number): MoveRecord {
+    return { kind: "move", dx, dy, clip, image: this.captureRegion(clip) };
+  }
+
+  /**
+   * Snapshot a region of the base as a PNG data URL, and register the canvas it was read from
+   * as the decoded bitmap so replay can draw it without decoding anything.
+   */
+  private captureRegion(clip: Rect): string {
     const snapshot = document.createElement("canvas");
     snapshot.width = clip.width;
     snapshot.height = clip.height;
     const ctx = snapshot.getContext("2d", { colorSpace: "srgb" });
     const base = this.base;
-    if (!ctx || !base) return { kind: "move", dx, dy, clip, image: "" };
+    if (!ctx || !base) return "";
 
-    ctx.drawImage(
-      base,
-      clip.x,
-      clip.y,
-      clip.width,
-      clip.height,
-      0,
-      0,
-      clip.width,
-      clip.height,
-    );
+    ctx.drawImage(base, clip.x, clip.y, clip.width, clip.height, 0, 0, clip.width, clip.height);
     const image = snapshot.toDataURL("image/png");
     registerMoveBitmap(image, snapshot);
-    return { kind: "move", dx, dy, clip, image };
+    return image;
+  }
+
+  /** Copy the selected region. Returns whether anything was copied. */
+  copySelection(): boolean {
+    const rect = this.selection;
+    if (rect === null || isEmptyRect(rect)) return false;
+    this.clipboard = { clip: rect, image: this.captureRegion(rect) };
+    return true;
+  }
+
+  /** Copy the selection and erase it. Two records, so undo restores both steps. */
+  cutSelection(): boolean {
+    if (!this.copySelection()) return false;
+    this.deleteSelection();
+    return true;
+  }
+
+  /**
+   * Where a pasted region should land.
+   *
+   * Offset diagonally so a paste is visible rather than landing exactly on its source, then
+   * clamped back inside the raster — a selection dragged off the edge must not paste
+   * off-canvas and vanish.
+   */
+  private pasteOffset(clip: Rect): { dx: number; dy: number } {
+    const step = 16 * this.doc.rasterScale;
+    const maxX = rasterWidth(this.doc);
+    const maxY = rasterHeight(this.doc);
+    const dx = clip.x + clip.width + step > maxX ? -step : step;
+    const dy = clip.y + clip.height + step > maxY ? -step : step;
+    const x = Math.min(Math.max(clip.x + dx, 0), Math.max(0, maxX - clip.width));
+    const y = Math.min(Math.max(clip.y + dy, 0), Math.max(0, maxY - clip.height));
+    return { dx: x - clip.x, dy: y - clip.y };
+  }
+
+  /**
+   * Paste the copied region and select it, so it can be moved straight away.
+   *
+   * A paste is a move: the same record shape, a different offset. It carries the same
+   * JSON-safe data URL, which is why copy and paste needed no new record kind and no
+   * encoding decision — the problem that has deferred image import twice.
+   */
+  paste(): boolean {
+    const clipboard = this.clipboard;
+    if (clipboard === null) return false;
+    const { dx, dy } = this.pasteOffset(clipboard.clip);
+    // A paste, not a move: the original must survive.
+    this.commit({
+      kind: "paste",
+      dx,
+      dy,
+      clip: clipboard.clip,
+      image: clipboard.image,
+    });
+    this.selection = {
+      x: clipboard.clip.x + dx,
+      y: clipboard.clip.y + dy,
+      width: clipboard.clip.width,
+      height: clipboard.clip.height,
+    };
+    this.paintOverlay();
+    this.requestRender();
+    this.emit();
+    return true;
   }
 
   /** Discard the selection without touching the document. */
@@ -1175,6 +1244,21 @@ export class Engine {
       }
       if ((key === "z" && event.shiftKey) || key === "y") {
         this.redo();
+        event.preventDefault();
+        return;
+      }
+      if (key === "c") {
+        this.copySelection();
+        event.preventDefault();
+        return;
+      }
+      if (key === "x") {
+        this.cutSelection();
+        event.preventDefault();
+        return;
+      }
+      if (key === "v") {
+        this.paste();
         event.preventDefault();
         return;
       }

@@ -93,7 +93,14 @@ describe("encode/decode — round trip", () => {
       dy: 0,
       clip: { x: 10, y: 20, width: 30, height: 40 },
     };
-    const every: PaintRecord[] = [stroke, shape, fill, clearRect, move];
+    const paste: PaintRecord = {
+      kind: "paste",
+      dx: 32,
+      dy: 32,
+      clip: { x: 10, y: 20, width: 30, height: 40 },
+      image: "data:image/png;base64,AAAA",
+    };
+    const every: PaintRecord[] = [stroke, shape, fill, clearRect, move, paste];
 
     const restored = decode(encode(save({ entries: every, cursor: every.length })))!;
     expect(restored.entries).toEqual(every);

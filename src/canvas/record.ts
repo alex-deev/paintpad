@@ -124,6 +124,23 @@ export interface MoveRecord {
   readonly image: string;
 }
 
+/**
+ * Place a captured region without erasing where it came from.
+ *
+ * Distinct from `move` because a move clears its source, and that difference is the whole
+ * difference: a cut takes the region away, a paste leaves the original standing. Reusing the
+ * move record for pasting silently deleted the source — copy then paste *reduced* the drawing.
+ */
+export interface PasteRecord {
+  readonly kind: "paste";
+  readonly dx: number;
+  readonly dy: number;
+  /** The region the bitmap was captured from, in integer raster coordinates. */
+  readonly clip: Rect;
+  /** PNG data URL of the region. */
+  readonly image: string;
+}
+
 /** The union of everything that can appear in history.
  *
  *  Named `PaintRecord` rather than `Record` so it never shadows TypeScript's built-in
@@ -133,7 +150,8 @@ export type PaintRecord =
   | ShapeRecord
   | FillRecord
   | ClearRectRecord
-  | MoveRecord;
+  | MoveRecord
+  | PasteRecord;
 
 export interface ShapeRecord {
   readonly kind: "shape";
@@ -257,7 +275,10 @@ export function registerMoveBitmap(dataUrl: string, source: CanvasImageSource): 
 export async function prepareRecords(records: readonly PaintRecord[]): Promise<void> {
   await Promise.all(
     records.map(async (record) => {
-      if (record.kind !== "move" || moveBitmaps.has(record.image)) return;
+      // Moves AND pastes both carry a bitmap. Missing paste here made a pasted region
+      // vanish after a reload — the record survived, the pixels it draws did not.
+      if (record.kind !== "move" && record.kind !== "paste") return;
+      if (moveBitmaps.has(record.image)) return;
       try {
         const image = new Image();
         image.src = record.image;
@@ -298,6 +319,27 @@ function applyMove(ctx: CanvasRenderingContext2D, record: MoveRecord): void {
   }
 }
 
+/**
+ * Place a captured region, leaving its source alone.
+ *
+ * The same blit as a move, minus the clear — which is the entire difference between pasting a
+ * copy and moving the original.
+ */
+function applyPaste(ctx: CanvasRenderingContext2D, record: PasteRecord): void {
+  const { clip, dx, dy, image } = record;
+  const bitmap = moveBitmaps.get(image);
+  if (!bitmap) return;
+
+  ctx.save();
+  try {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(bitmap, clip.x + dx, clip.y + dy);
+    ctx.imageSmoothingEnabled = true;
+  } finally {
+    ctx.restore();
+  }
+}
+
 export function applyRecord(
   ctx: CanvasRenderingContext2D,
   record: PaintRecord,
@@ -313,6 +355,10 @@ export function applyRecord(
   }
   if (record.kind === "move") {
     applyMove(ctx, record);
+    return;
+  }
+  if (record.kind === "paste") {
+    applyPaste(ctx, record);
     return;
   }
   renderRecord(ctx, record, rasterScale);
@@ -385,7 +431,12 @@ export function renderRecord(
       return;
     }
     // Pixels, not paths — these go through applyRecord instead.
-    if (record.kind === "fill" || record.kind === "clearRect" || record.kind === "move") {
+    if (
+      record.kind === "fill" ||
+      record.kind === "clearRect" ||
+      record.kind === "move" ||
+      record.kind === "paste"
+    ) {
       return;
     }
     const ops = strokeToOps(record.points, record.width);

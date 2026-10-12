@@ -168,6 +168,23 @@ Two consequences worth recording:
   no reentrancy to guard, and `recordBounds` / `recordsForMove` were deleted rather than left
   behind as dead code.
 
+## Slice 11c — copy, cut, paste
+
+A clipboard is session state on purpose: not a record, not undoable, not autosaved. A reload
+starts with an empty clipboard.
+
+**Paste is NOT a move, and that difference is the whole point.** A move clears its source.
+Reusing the move record for paste made copy-then-paste *reduce* the drawing — it deleted the
+original. `PasteRecord` is the same blit without the clear.
+
+`Ctrl+C` / `Ctrl+X` / `Ctrl+V`. A cut is a copy plus one `clearRect` record, so undo restores
+both steps. A paste selects the result, so it can be dragged straight away.
+
+`prepareRecords` decodes bitmaps for **both** `move` and `paste`. Missing paste there was a
+real bug: the record survived a reload and the pixels it draws did not, so a pasted region
+vanished on refresh while working perfectly in-session — the same silent-failure shape as a
+record kind missing from `RECORD_KINDS`.
+
 ## Boundaries
 
 **Always**

@@ -49,6 +49,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 | Transparency | `∅` clears the canvas background |
 | Bucket scope | The toggle beside the tools — `Contiguous` fills the connected region, `Global` every matching pixel |
 | Selection | `7`, then drag a box. Drag **inside** it to move, outside to start a new one. `Delete` erases the contents |
+| Clipboard | `Ctrl+C` copy · `Ctrl+X` cut · `Ctrl+V` paste (the paste is selected, so you can move it) |
 
 The canvas opens **transparent**. Set a background from the second swatch and the eraser
 restores it; leave it unset and erasing produces real transparency, which PNG export
@@ -89,11 +90,13 @@ rejected.
 
 ## Known limitations
 
-- **Selection moves and deletes, but there is no cut, copy, or paste yet.** A move carries its
+- **Selection supports move, delete, copy, cut and paste.** A move carries its
   region as a PNG data URL in the command log, so it costs the same whether it is the first
   move or the fiftieth. An earlier design re-derived the region from the records that produced
   it; that was exact but duplicated exponentially, and ten moves of one stroke grew the save to
-  1.3 MB.
+  1.3 MB. The clipboard is session state, so it does not survive a reload.
+- **The clipboard is internal only.** Paste works inside PaintPad; it does not yet exchange
+  images with other applications or the system clipboard.
 - **An occasional e2e failure reading "canvas.surface not found" is not yet root-caused.** It
   appears roughly once every few full-suite runs, always at ~2 s, never in isolation, and is
   accompanied by a blank page rather than a hidden element. A Vite dev-server module-load
