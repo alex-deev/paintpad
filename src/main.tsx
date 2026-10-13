@@ -260,6 +260,40 @@ function App() {
           {settings.fillContiguous ? "Contiguous" : "Global"}
         </button>
 
+        {/* Selection state. The dashed marquee on the canvas is easy to miss, and Delete,
+            Copy and Cut were keyboard-only with nothing on screen suggesting they exist. */}
+        <div className="group" role="group" aria-label="Selection">
+          <span className="readout" data-testid="selection-readout">
+            {settings.selectionSize
+              ? `Selection ${settings.selectionSize.width} × ${settings.selectionSize.height}`
+              : "No selection"}
+          </span>
+          <button
+            type="button"
+            onClick={() => engine.deleteSelection()}
+            title="Erase the selected pixels (Delete)"
+            disabled={!settings.hasSelection}
+          >
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={() => engine.copySelection()}
+            title="Copy the selected region (Ctrl+C)"
+            disabled={!settings.hasSelection}
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={() => engine.cutSelection()}
+            title="Copy the selected region and erase it (Ctrl+X)"
+            disabled={!settings.hasSelection}
+          >
+            Cut
+          </button>
+        </div>
+
         <div className="group">
           <button
             type="button"

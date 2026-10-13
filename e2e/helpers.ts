@@ -21,6 +21,7 @@ declare global {
         canRedo: boolean;
         recordCount: number;
         hasSelection: boolean;
+        selectionSize: { width: number; height: number } | null;
       };
       undo(): void;
       redo(): void;

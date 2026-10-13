@@ -116,6 +116,13 @@ export interface EngineSettings {
   readonly fillContiguous: boolean;
   /** Whether a selection exists, so the UI can enable Delete. */
   readonly hasSelection: boolean;
+  /**
+   * Selection size in logical (CSS) pixels, for the toolbar readout.
+   *
+   * The engine works in raster coordinates; a user reads pixels off the screen, so this
+   * converts rather than leaving the UI to know about the raster scale.
+   */
+  readonly selectionSize: { readonly width: number; readonly height: number } | null;
 }
 
 export class Engine {
@@ -155,6 +162,7 @@ export class Engine {
     fillShapes: false,
     fillContiguous: true,
     hasSelection: false,
+    selectionSize: null,
   };
   private activePointerId: number | null = null;
   private panPointerId: number | null = null;
@@ -365,6 +373,12 @@ export class Engine {
       fillShapes: this.fillShapes,
       fillContiguous: this.fillContiguous,
       hasSelection: this.selection !== null,
+      selectionSize: this.selection
+        ? {
+            width: Math.round(this.selection.width / this.doc.rasterScale),
+            height: Math.round(this.selection.height / this.doc.rasterScale),
+          }
+        : null,
     };
   }
 

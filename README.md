@@ -50,6 +50,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 | Bucket scope | The toggle beside the tools — `Contiguous` fills the connected region, `Global` every matching pixel |
 | Selection | `7`, then drag a box. Drag **inside** it to move, outside to start a new one. `Delete` erases the contents |
 | Clipboard | `Ctrl+C` copy · `Ctrl+X` cut · `Ctrl+V` paste (the paste is selected, so you can move it) |
+| Selection size | Shown in the toolbar while a selection exists, in document pixels |
 
 The canvas opens **transparent**. Set a background from the second swatch and the eraser
 restores it; leave it unset and erasing produces real transparency, which PNG export
@@ -97,6 +98,11 @@ rejected.
   1.3 MB. The clipboard is session state, so it does not survive a reload.
 - **The clipboard is internal only.** Paste works inside PaintPad; it does not yet exchange
   images with other applications or the system clipboard.
+- **Toolbar changes used to break drawing.** The tool bar was a single unwrapped row, so
+  adding controls could push it past the viewport, widen the stage beyond the screen and drag
+  the canvas off the left edge — every draw test then failed because its start point was no
+  longer over the canvas. It wraps now, and the stage is capped at the viewport width. Several
+  tests also depend on fit-to-stage geometry and pin 1:1 where absolute pixel positions matter.
 - **An occasional e2e failure reading "canvas.surface not found" is not yet root-caused.** It
   appears roughly once every few full-suite runs, always at ~2 s, never in isolation, and is
   accompanied by a blank page rather than a hidden element. A Vite dev-server module-load

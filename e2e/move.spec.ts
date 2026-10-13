@@ -275,6 +275,14 @@ test("a move carries a deleted region without resurrecting it", async ({ page })
 });
 
 test("a move leaves the rest of the drawing alone", async ({ page }) => {
+  // Pinned to 1:1. At fit-to-stage the selection and its offset are expressed in CSS pixels,
+  // so a change to the toolbar — anything that resizes the stage — moves the drawing in
+  // document space and can push the moved region past the canvas edge. Content that runs off
+  // the canvas is clipped, which is correct, but it breaks an exact pixel-conservation
+  // assertion. Fixed zoom makes the geometry stable and keeps this test about the move.
+  await page.getByRole("button", { name: "1:1" }).click();
+  await page.waitForTimeout(120);
+
   await setTool(page, "pencil");
   await setWidth(page, 20);
   await page.getByTestId("swatch-foreground").click();
