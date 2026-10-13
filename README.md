@@ -51,6 +51,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 | Selection | `7`, then drag a box. Drag **inside** it to move, outside to start a new one. `Delete` erases the contents |
 | Clipboard | `Ctrl+C` copy · `Ctrl+X` cut · `Ctrl+V` paste (the paste is selected, so you can move it) |
 | Selection size | Shown in the toolbar while a selection exists, in document pixels |
+| Selection highlight | The canvas dims outside the selection while one is active, so the selected region reads at full contrast. It is a view layer: it never reaches the artwork, a record, an export, or an autosave |
 
 The canvas opens **transparent**. Set a background from the second swatch and the eraser
 restores it; leave it unset and erasing produces real transparency, which PNG export

@@ -260,8 +260,8 @@ function App() {
           {settings.fillContiguous ? "Contiguous" : "Global"}
         </button>
 
-        {/* Selection state. The dashed marquee on the canvas is easy to miss, and Delete,
-            Copy and Cut were keyboard-only with nothing on screen suggesting they exist. */}
+        {/* Delete, Copy and Cut were keyboard-only, with nothing on screen suggesting they
+            existed. The selection itself is shown above the canvas. */}
         <div className="group" role="group" aria-label="Selection">
           <span className="readout" data-testid="selection-readout">
             {settings.selectionSize

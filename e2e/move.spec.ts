@@ -63,16 +63,30 @@ async function block(page: Page, x: number, y: number): Promise<void> {
 }
 
 /** Sample the composited view at a CSS point. */
+/**
+ * Sample the ARTWORK raster, not the composited view.
+ *
+ * These tests assert what was moved, deleted or pasted — document questions. Reading the view
+ * instead makes the selection highlight's dim part of the answer: it adds coverage to empty
+ * areas, so "this region is now transparent" reads back as dimmed rather than blank.
+ */
 async function sampleAt(page: Page, x: number, y: number): Promise<number[]> {
   return page.evaluate(
-    ({ x, y }) => {
-      const canvas = document.querySelector("canvas.surface") as HTMLCanvasElement;
-      const rect = canvas.getBoundingClientRect();
-      const ctx = canvas.getContext("2d")!;
+    async ({ x, y }) => {
+      const img = new Image();
+      img.src = window.__paintpad.snapshotDataUrl()!;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const cx = c.getContext("2d")!;
+      cx.drawImage(img, 0, 0);
+      const rect = (document.querySelector("canvas.surface") as HTMLCanvasElement)
+        .getBoundingClientRect();
       return Array.from(
-        ctx.getImageData(
-          Math.round((x / rect.width) * canvas.width),
-          Math.round((y / rect.height) * canvas.height),
+        cx.getImageData(
+          Math.round((x / rect.width) * img.width),
+          Math.round((y / rect.height) * img.height),
           1,
           1,
         ).data,
@@ -81,6 +95,7 @@ async function sampleAt(page: Page, x: number, y: number): Promise<number[]> {
     { x, y },
   );
 }
+
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");

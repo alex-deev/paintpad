@@ -705,6 +705,9 @@ export class Engine {
       ctx.clearRect(0, 0, overlay.width, overlay.height);
       // Erases are NOT drawn here. The overlay is additive; a destination-out pass against
       // a transparent layer would remove nothing. They are composited onto the view instead.
+      // Dim first, so an in-progress stroke or shape stays at full contrast on top of the dim
+      // rather than being darkened along with everything else.
+      this.paintSelectionLayer(ctx);
       if (this.current && !isEraseInProgress(this.current)) {
         renderRecord(ctx, this.current, this.doc.rasterScale);
       }
@@ -833,6 +836,36 @@ export class Engine {
    * Two offset dashed passes rather than one: a single dash colour vanishes against artwork of
    * the same colour, which is exactly what the user is selecting.
    */
+  /**
+   * Dim the canvas everywhere except the selection.
+   *
+   * Drawn on the overlay — a layer above the surface — so it costs nothing in the document and
+   * never becomes part of a record, an export, or an autosave. It answers the question the
+   * dashed marquee cannot: not just *where* the selection is, but *what* it contains, since
+   * the artwork inside stays at full contrast while everything around it recedes.
+   *
+   * The punch-out is a `destination-out` fill on the overlay rather than a path with a hole,
+   * which keeps it to two fills.
+   */
+  private paintSelectionLayer(ctx: CanvasRenderingContext2D): void {
+    const rect = this.selection;
+    if (rect === null || isEmptyRect(rect)) return;
+
+    const overlay = this.overlay;
+    if (!overlay) return;
+    ctx.save();
+    try {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "rgba(5, 7, 12, 0.62)";
+      ctx.fillRect(0, 0, overlay.width, overlay.height);
+      // Clear the selection back out of the dim.
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    } finally {
+      ctx.restore();
+    }
+  }
+
   private paintMarquee(ctx: CanvasRenderingContext2D): void {
     const rect = this.selection;
     if (rect === null || this.tool !== "select" || isEmptyRect(rect)) return;
