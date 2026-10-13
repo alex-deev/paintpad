@@ -62,11 +62,16 @@ async function inkCount(page: Page): Promise<number> {
 test("document pixels are identical at deviceScaleFactor 1, 2 and 3", async ({ browser }) => {
   const results = await Promise.all(SCALES.map((scale) => drawOnFreshPage(browser, scale)));
 
-  // The view canvas is display-scaled by DPR, in exact proportion...
-  expect(results[1]!.viewWidth).toBe(results[0]!.viewWidth * 2);
-  expect(results[2]!.viewWidth).toBe(results[0]!.viewWidth * 3);
+  // The view canvas is display-scaled by DPR, in proportion to within a pixel of rounding.
+  // The CSS width is fractional (fit-to-stage divides), and `Math.round(css * dpr)` does not
+  // have to land on exactly `round(css) * dpr`. Any layout change that shifts the stage by a
+  // fraction of a pixel perturbs this, so the assertion allows 1px — the point is that the view
+  // scales with DPR and not that arithmetic happens to be exact.
+  expect(Math.abs(results[1]!.viewWidth - results[0]!.viewWidth * 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(results[2]!.viewWidth - results[0]!.viewWidth * 3)).toBeLessThanOrEqual(1);
 
-  // ...but the committed document must be bit-for-bit the same at every scale.
+  // The committed document, though, must be bit-for-bit identical at every scale. This is the
+  // assertion that matters and it stays exact.
   expect(results[1]!.document).toBe(results[0]!.document);
   expect(results[2]!.document).toBe(results[0]!.document);
 

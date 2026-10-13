@@ -6,6 +6,7 @@ import { prepareRecords } from "./canvas/record";
 import { decode, encode } from "./canvas/serialize";
 import { clearDocument, flushSave, loadDocument, saveDocument } from "./canvas/storage";
 import type { ToolId } from "./canvas/record";
+import { ToolIcon } from "./ui/icons";
 import "./styles.css";
 
 type Slot = "foreground" | "background";
@@ -215,85 +216,6 @@ function App() {
       <header className="bar">
         <span className="brand">PaintPad</span>
 
-        <div className="group" role="group" aria-label="Tool">
-          {TOOLS.map((tool) => (
-            <ToolButton
-              key={tool.id}
-              tool={tool.id}
-              active={settings.tool === tool.id}
-              engine={engine}
-              label={`${tool.id} (${tool.key})`}
-            />
-          ))}
-        </div>
-
-        <label className="group">
-          Size {settings.width}px
-          <input
-            type="range"
-            min={1}
-            max={64}
-            value={settings.width}
-            onChange={(e) => engine.setWidth(Number(e.target.value))}
-          />
-        </label>
-
-        <button
-          type="button"
-          aria-pressed={settings.fillShapes}
-          data-fill="toggle"
-          onClick={() => engine.setFillShapes(!settings.fillShapes)}
-          title="Fill shapes with the foreground colour"
-          disabled={settings.tool === "pencil" || settings.tool === "eraser"}
-        >
-          Fill
-        </button>
-
-        <button
-          type="button"
-          data-testid="fill-mode"
-          aria-pressed={settings.fillContiguous}
-          onClick={() => engine.setFillContiguous(!settings.fillContiguous)}
-          title="Bucket: fill the connected region, or every matching pixel"
-          disabled={settings.tool !== "fill"}
-        >
-          {settings.fillContiguous ? "Contiguous" : "Global"}
-        </button>
-
-        {/* Delete, Copy and Cut were keyboard-only, with nothing on screen suggesting they
-            existed. The selection itself is shown above the canvas. */}
-        <div className="group" role="group" aria-label="Selection">
-          <span className="readout" data-testid="selection-readout">
-            {settings.selectionSize
-              ? `Selection ${settings.selectionSize.width} × ${settings.selectionSize.height}`
-              : "No selection"}
-          </span>
-          <button
-            type="button"
-            onClick={() => engine.deleteSelection()}
-            title="Erase the selected pixels (Delete)"
-            disabled={!settings.hasSelection}
-          >
-            Delete
-          </button>
-          <button
-            type="button"
-            onClick={() => engine.copySelection()}
-            title="Copy the selected region (Ctrl+C)"
-            disabled={!settings.hasSelection}
-          >
-            Copy
-          </button>
-          <button
-            type="button"
-            onClick={() => engine.cutSelection()}
-            title="Copy the selected region and erase it (Ctrl+X)"
-            disabled={!settings.hasSelection}
-          >
-            Cut
-          </button>
-        </div>
-
         <div className="group">
           <button
             type="button"
@@ -461,9 +383,87 @@ function App() {
         </div>
       </div>
 
-      <footer className="bar foot">
-        <span>Drag to draw · wheel to zoom · space-drag or middle-drag to pan</span>
-        <span>
+      <footer className="bar toolbar">
+        <div className="group tools" role="group" aria-label="Tool">
+          {TOOLS.map((tool) => (
+            <ToolButton
+              key={tool.id}
+              tool={tool.id}
+              keyHint={tool.key}
+              active={settings.tool === tool.id}
+              engine={engine}
+            />
+          ))}
+        </div>
+
+        <label className="group">
+          Size {settings.width}px
+          <input
+            type="range"
+            min={1}
+            max={64}
+            value={settings.width}
+            onChange={(e) => engine.setWidth(Number(e.target.value))}
+          />
+        </label>
+
+        <div className="group">
+          <button
+            type="button"
+            data-fill="toggle"
+            onClick={() => engine.setFillShapes(!settings.fillShapes)}
+            title="Fill shapes with the foreground colour"
+            disabled={settings.tool === "pencil" || settings.tool === "eraser"}
+          >
+            Fill
+          </button>
+          <button
+            type="button"
+            data-testid="fill-mode"
+            aria-pressed={settings.fillContiguous}
+            onClick={() => engine.setFillContiguous(!settings.fillContiguous)}
+            title="Bucket: fill the connected region, or every matching pixel"
+            disabled={settings.tool !== "fill"}
+          >
+            {settings.fillContiguous ? "Contiguous" : "Global"}
+          </button>
+        </div>
+
+        {/* Delete, Copy and Cut were keyboard-only, with nothing on screen suggesting they
+            existed. The selection itself is shown on the canvas. */}
+        <div className="group" role="group" aria-label="Selection">
+          <span className="readout" data-testid="selection-readout">
+            {settings.selectionSize
+              ? `Selection ${settings.selectionSize.width} × ${settings.selectionSize.height}`
+              : "No selection"}
+          </span>
+          <button
+            type="button"
+            onClick={() => engine.deleteSelection()}
+            title="Erase the selected pixels (Delete)"
+            disabled={!settings.hasSelection}
+          >
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={() => engine.copySelection()}
+            title="Copy the selected region (Ctrl+C)"
+            disabled={!settings.hasSelection}
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            onClick={() => engine.cutSelection()}
+            title="Copy the selected region and erase it (Ctrl+X)"
+            disabled={!settings.hasSelection}
+          >
+            Cut
+          </button>
+        </div>
+
+        <span className="status">
           {settings.tool} · {settings.width}px · {Math.round(settings.viewport.zoom * 100)}% ·{" "}
           {settings.recordCount} op{settings.recordCount === 1 ? "" : "s"}
         </span>
@@ -525,24 +525,31 @@ async function handleExport(engine: Engine): Promise<void> {
 
 function ToolButton({
   tool,
+  keyHint,
   active,
   engine,
-  label,
 }: {
   tool: ToolId;
+  keyHint: string;
   active: boolean;
   engine: Engine;
-  label: string;
 }) {
+  // `aria-label` and `title` keep the tool's NAME. The e2e suite locates tools by `data-tool`
+  // and other controls by accessible name, so the icon is purely visual and the name has to
+  // survive it.
+  const label = `${tool} (${keyHint})`;
   return (
     <button
       type="button"
+      className="tool"
+      aria-label={label}
+      title={label}
       aria-pressed={active}
       data-tool={tool}
       onClick={() => engine.setTool(tool)}
-      title={label}
     >
-      {tool}
+      <ToolIcon tool={tool} />
+      <kbd className="hint-key">{keyHint}</kbd>
     </button>
   );
 }

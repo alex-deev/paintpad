@@ -264,16 +264,25 @@ describe("floodFill — edge cases", () => {
     expect(result.changed).toBe(5);
   });
 
-  it("does not recurse: a 2000x2000 region completes without exhausting the stack", () => {
-    // A recursive implementation blows the call stack here. This is the regression the
-    // design review flagged, so it is worth pinning explicitly.
-    const w = 2000;
-    const h = 2000;
-    const data = buffer(w, h);
-    const result = floodFill(data, w, h, { x: 1000, y: 1000 }, RED, options);
-    expect(result.changed).toBe(2000 * 2000);
-    expect(result.bounds).toEqual({ x: 0, y: 0, width: 2000, height: 2000 });
-  });
+  it(
+    "does not recurse: a 2000x2000 region completes without exhausting the stack",
+    { timeout: 20_000 },
+    () => {
+      // A recursive implementation blows the call stack here. This is the regression the
+      // design review flagged, so it is worth pinning explicitly.
+      //
+      // The timeout is generous on purpose. The guard is against *stack exhaustion*, not speed,
+      // and a 4M-pixel fill takes a few hundred milliseconds but blows past the default 5s under
+      // v8 coverage instrumentation on a loaded machine. A timeout that fires intermittently
+      // is worse than no test at all, because it trains you to re-run rather than investigate.
+      const w = 2000;
+      const h = 2000;
+      const data = buffer(w, h);
+      const result = floodFill(data, w, h, { x: 1000, y: 1000 }, RED, options);
+      expect(result.changed).toBe(2000 * 2000);
+      expect(result.bounds).toEqual({ x: 0, y: 0, width: 2000, height: 2000 });
+    },
+  );
 
   it("leaves the input untouched when the seed does not match anything replaceable", () => {
     const w = 4;

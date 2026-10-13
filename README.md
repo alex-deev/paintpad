@@ -39,7 +39,7 @@ npm run test:e2e:update # regenerate screenshot goldens — inspect them before 
 
 | | |
 |---|---|
-| Tools | `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse · `6` bucket · `7` select |
+| Tools | Bottom toolbar. `1` pencil · `2` eraser · `3` line · `4` rectangle · `5` ellipse · `6` bucket · `7` select |
 | Size | `[` / `]`, or the slider |
 | Colours | Palette, native picker, or a hex value. Click a swatch to target it, `X` or ⇄ to swap |
 | Undo / redo | `Ctrl+Z` · `Ctrl+Shift+Z` or `Ctrl+Y` |
@@ -102,8 +102,10 @@ rejected.
 - **Toolbar changes used to break drawing.** The tool bar was a single unwrapped row, so
   adding controls could push it past the viewport, widen the stage beyond the screen and drag
   the canvas off the left edge — every draw test then failed because its start point was no
-  longer over the canvas. It wraps now, and the stage is capped at the viewport width. Several
-  tests also depend on fit-to-stage geometry and pin 1:1 where absolute pixel positions matter.
+  longer over the canvas. It wraps now, is capped at the viewport width, and the tools are
+  icons, which is what stopped it overflowing in the first place. Several tests depend on
+  fit-to-stage geometry and pin 1:1 where absolute pixel positions matter; the DPR test allows
+  a pixel of rounding on view scaling, because the document assertion beside it must stay exact.
 - **An occasional e2e failure reading "canvas.surface not found" is not yet root-caused.** It
   appears roughly once every few full-suite runs, always at ~2 s, never in isolation, and is
   accompanied by a blank page rather than a hidden element. A Vite dev-server module-load
