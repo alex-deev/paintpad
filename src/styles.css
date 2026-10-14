@@ -172,32 +172,6 @@ input[type="range"] {
   font-variant-numeric: tabular-nums;
 }
 
-/* Narrow screens: the colour bar scrolls rather than wrapping into a tall block, and the
-   status readout is the first thing to go since it is the least useful. */
-@media (max-width: 1100px) {
-  .toolbar .status {
-    display: none;
-  }
-}
-
-@media (max-width: 900px) {
-  .colourbar,
-  .palette {
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .bar {
-    gap: 10px;
-    padding: 6px 8px;
-  }
-
-  .tool {
-    width: 34px;
-    height: 32px;
-  }
-}
-
 .stage {
   position: relative;
   overflow: hidden;
@@ -354,4 +328,133 @@ input[type="range"] {
 
 .hex input.invalid {
   border-color: #ff6b6b;
+}
+
+@media (max-width: 1100px) {
+  .toolbar .status {
+    display: none;
+  }
+}
+
+/*
+ * Compact layout.
+ *
+ * Measured before changing anything: on a 390x844 phone the chrome took 42% of the screen and
+ * 47% in landscape, leaving the canvas less than half the viewport. Both bottom bars were
+ * wrapping into three rows each — `.colourbar` and `.toolbar` both carry `flex-wrap: wrap`, and
+ * the earlier `overflow-x: auto` never got a chance because wrapping happens first.
+ *
+ * So below 900px each bar becomes a SINGLE scrollable row instead of stacking. That is the
+ * whole trick: chrome stops competing for height, and anything that does not fit is reachable
+ * by scrolling rather than by pushing the canvas off the screen.
+ */
+@media (max-width: 900px) {
+  /* All three bars become one scrollable row each. The top bar was wrapping onto two rows,
+     which cost 38px of canvas height for no benefit. */
+  .topbar,
+  .colourbar,
+  .toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    gap: 10px;
+    padding: 6px 8px;
+  }
+
+  .colourbar::-webkit-scrollbar,
+  .toolbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* The palette was a fixed 13-column grid, which cannot shrink and so forced a wrap. It
+     becomes a single scrolling row of chips. */
+  .palette {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+  }
+
+  /* Touch targets. 22px is about as large as a colour chip can go before the row stops being
+     usable; the tools go to 42px, just under the 44px guideline, because 44 would exceed a
+     phone's width outright with seven tools plus a badge. */
+  .chip {
+    width: 22px;
+    height: 22px;
+  }
+
+  .chip.small {
+    width: 18px;
+    height: 18px;
+  }
+
+  .tool {
+    width: 42px;
+    height: 42px;
+  }
+
+  .tool .icon {
+    width: 21px;
+    height: 21px;
+  }
+
+  .bar {
+    gap: 10px;
+    padding: 6px 8px;
+  }
+
+  /* The brand is the only thing on the top bar that is not a control. */
+  .brand {
+    display: none;
+  }
+}
+
+/*
+ * Landscape phones have the least vertical room of any target, and this is where chrome costs
+ * most: at 844x390 the canvas was left 206px tall. One compact row per bar buys back a third
+ * of that, so the shortcut badges go too — they are the least useful thing in the row.
+ */
+@media (max-height: 480px) {
+  .bar {
+    padding: 4px 8px;
+  }
+
+  /* The swatch cards are what hold the colour bar open at 43px. In landscape on a phone,
+     where the whole viewport is 390px tall, a one-line swatch is worth more than its label. */
+  .swatch {
+    width: 46px;
+    height: 26px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .swatch .swatch-name {
+    display: none;
+  }
+
+  .tool {
+    width: 34px;
+    height: 34px;
+  }
+
+  .chip {
+    width: 18px;
+    height: 18px;
+  }
+
+  .hint-key {
+    display: none;
+  }
+}
+
+/* Notched phones: keep chrome clear of the notch and the home indicator. */
+@supports (padding: max(0px)) {
+  .bar {
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  .toolbar {
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+  }
 }

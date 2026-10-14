@@ -213,7 +213,7 @@ function App() {
 
   return (
     <div className="app">
-      <header className="bar">
+      <header className="bar topbar">
         <span className="brand">PaintPad</span>
 
         <div className="group">
@@ -496,7 +496,7 @@ function Swatch({
       data-testid={testId}
       onClick={onSelect}
     >
-      <span>{label}</span>
+      <span className="swatch-name">{label}</span>
       <code>{colour ?? "none"}</code>
     </button>
   );

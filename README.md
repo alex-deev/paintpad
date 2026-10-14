@@ -60,6 +60,29 @@ preserves.
 `Export` downloads a PNG at the document's own resolution (2560×1440 by default, since
 strokes are rasterised at 2×) — independent of your current zoom and display scaling.
 
+## Responsive layout
+
+The three bars — document actions, colour, tools — each become a **single scrolling row**
+below 900px wide. That is the whole trick, and it is worth more than it sounds: before it,
+both bottom bars wrapped into three rows on a phone, and `.palette` was a fixed 13-column grid
+that could not shrink, so it forced a wrap regardless.
+
+| | chrome before | after | canvas (390x844) |
+|---|---|---|---|
+| Phone portrait | 42% | **18%** | 487px → **692px** |
+| Phone landscape | 47% | **33%** | 206px → **262px** |
+| Tablet | 22% | **15%** | — |
+
+Landscape gets a looser budget because the viewport is only 390px tall; 33% there still leaves
+a usable canvas, and the point is that none of these regress toward leaving the canvas the
+minority of the screen. `e2e/responsive.spec.ts` pins those budgets, plus the no-page-overflow
+and one-row-per-bar invariants.
+
+Also handled: larger touch targets on narrow screens (42px tools, 22px chips), a
+`max-height: 480px` compaction for landscape phones that drops the shortcut badges and shrinks
+the swatch cards to a single line, and `env(safe-area-inset-*)` padding so notched phones keep
+chrome clear of the notch and home indicator.
+
 ## How it works
 
 The canvas is **always derived from a command log**. Drawing, replay, and undo all go
