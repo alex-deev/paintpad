@@ -103,6 +103,17 @@ button[aria-pressed="true"] .hint-key {
   letter-spacing: 0.2px;
 }
 
+/* A link that reads as a label. Underline only on hover, so the bar's appearance is
+   unchanged until the user actually aims at it. */
+a.brand {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.brand:hover {
+  text-decoration: underline;
+}
+
 .hint {
   color: var(--muted);
 }

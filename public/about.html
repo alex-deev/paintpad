@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About PaintPad</title>
+    <meta name="description" content="What PaintPad is, how it works, and its keyboard shortcuts." />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="site">
+        <span class="brand">PaintPad</span>
+        <nav class="site" aria-label="Site">
+          <a href="/about.html" aria-current="page">About</a>
+          <a href="/privacy.html">Privacy</a>
+          <a href="/terms.html">Terms</a>
+          <a href="/contact.html">Contact</a>
+        </nav>
+      </header>
+
+      <main>
+        <h1>About PaintPad</h1>
+        <p class="lede">
+          A browser-based drawing editor — a modern take on MS Paint. No account, no upload,
+          no server: everything you draw stays in your own browser.
+        </p>
+
+        <p>
+          <a href="/">Open the editor</a>.
+        </p>
+
+        <h2>What it does</h2>
+        <ul>
+          <li>Pencil, eraser, line, rectangle, ellipse, flood fill and rectangular selection</li>
+          <li>Move, delete, copy, cut and paste a selection</li>
+          <li>A 24-colour palette, the system colour picker, and hex entry</li>
+          <li>Real transparency, preserved through export</li>
+          <li>Autosave, so reloading brings your drawing back</li>
+          <li>PNG export at three sizes</li>
+        </ul>
+
+        <h2>Keyboard shortcuts</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Action</th>
+              <th>Keys</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Select tool</td><td><code>1</code>–<code>7</code></td></tr>
+            <tr><td>Brush size</td><td><code>[</code> <code>]</code></td></tr>
+            <tr><td>Swap draw and canvas colours</td><td><code>X</code></td></tr>
+            <tr><td>Undo / redo</td><td><code>Ctrl+Z</code> · <code>Ctrl+Shift+Z</code> · <code>Ctrl+Y</code></td></tr>
+            <tr><td>Copy / cut / paste</td><td><code>Ctrl+C</code> · <code>Ctrl+X</code> · <code>Ctrl+V</code></td></tr>
+            <tr><td>Delete selection contents</td><td><code>Delete</code> or <code>Backspace</code></td></tr>
+            <tr><td>Zoom</td><td>Mouse wheel, or <code>+</code> / <code>−</code> / <code>1:1</code> / <code>Fit</code></td></tr>
+            <tr><td>Pan</td><td>Space-drag, or middle-drag</td></tr>
+            <tr><td>Constrain</td><td>Hold <code>Shift</code> — 45° lines, squares, circles</td></tr>
+          </tbody>
+        </table>
+
+        <h2>How it works</h2>
+        <p>
+          The canvas is always derived from a command log. Drawing, replay and undo all run
+          through the same code path, so a committed pixel and a replayed pixel are the same
+          pixel. Autosave stores that log, which means your drawing comes back by replaying the
+          same path live drawing took.
+        </p>
+        <p>
+          Two consequences are worth knowing. Backgrounds are composited beneath the artwork
+          rather than baked into it, so erasing and then changing the background behaves the way
+          you would expect. And fills store the parameters of a fill rather than the resulting
+          pixels, which keeps your history small enough to save.
+        </p>
+
+        <h2>Export sizes</h2>
+        <p>
+          Export offers three sizes, all derived from the document itself rather than fixed
+          pixel counts. The largest is the document's true resolution; the others are
+          downscales of it. No option ever enlarges the image, because a larger PNG is not more
+          detail.
+        </p>
+
+        <h2>Known limitations</h2>
+        <ul>
+          <li>
+            <strong>No image import.</strong> Opening an existing PNG is not yet supported.
+          </li>
+          <li>
+            <strong>The clipboard is internal.</strong> Paste works inside PaintPad, but does
+            not exchange images with other applications or the system clipboard yet.
+          </li>
+          <li>
+            <strong>Fills stop at a freehand edge.</strong> Freehand strokes are antialiased, so
+            a fill meets the outline along a ramp of partially transparent pixels and an exact
+            colour match stops just short of it.
+          </li>
+          <li>
+            <strong>One document at a time.</strong> There is a single saved document per
+            browser, not a library of files.
+          </li>
+        </ul>
+
+        <h2>Open source</h2>
+        <p>
+          PaintPad is licensed under the GNU Affero General Public License v3.0. AGPL §13 is
+          the part that matters in practice for a browser app: if you run your own hosted copy,
+          you must offer your users the corresponding source. Hosting PaintPad unmodified is
+          fine. See <a href="/terms.html">Terms</a> for the plain-English version.
+        </p>
+      </main>
+
+      <footer class="site">
+        <p><a href="/">Back to the editor</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a> · <a href="/contact.html">Contact</a></p>
+      </footer>
+    </div>
+  </body>
+</html>

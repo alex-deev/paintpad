@@ -1,0 +1,188 @@
+/* Shared styling for the static pages in /public.
+ *
+ * These pages are deliberately NOT part of the React app: four legal pages do not justify a
+ * router, and Vite copies this directory to the build root verbatim. The palette is duplicated
+ * from src/styles.css on purpose — linking the app stylesheet would couple these files to the
+ * bundle and to its hash, which changes on every unrelated build.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #12141a;
+  --panel: #1b1e26;
+  --line: #2b3040;
+  --text: #e6e9f0;
+  --muted: #8b93a7;
+  --accent: #5b8cff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 20px 72px;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+header.site {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  padding: 28px 0 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+header.site .brand {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+nav.site a,
+header.site a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+nav.site a:hover,
+header.site a:hover,
+nav.site a:focus-visible,
+header.site a:focus-visible {
+  text-decoration: underline;
+}
+
+nav.site {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 14px;
+}
+
+main {
+  padding-top: 12px;
+}
+
+h1 {
+  font-size: 26px;
+  line-height: 1.25;
+  margin: 30px 0 4px;
+}
+
+h2 {
+  font-size: 18px;
+  margin: 34px 0 4px;
+}
+
+p,
+li {
+  color: var(--text);
+}
+
+.lede {
+  color: var(--muted);
+  margin-top: 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+ul,
+ol {
+  padding-left: 22px;
+}
+
+li {
+  margin: 5px 0;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 15px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+dt {
+  font-weight: 600;
+  margin-top: 12px;
+}
+
+dd {
+  margin: 2px 0 0 22px;
+  color: var(--muted);
+}
+
+.note {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 18px 0;
+}
+
+.note p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+footer.site {
+  margin-top: 46px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+footer.site a {
+  color: var(--muted);
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

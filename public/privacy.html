@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy — PaintPad</title>
+    <meta name="description" content="What PaintPad stores, where it stores it, and how to delete it." />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="site">
+        <span class="brand">PaintPad</span>
+        <nav class="site" aria-label="Site">
+          <a href="/about.html">About</a>
+          <a href="/privacy.html" aria-current="page">Privacy</a>
+          <a href="/terms.html">Terms</a>
+          <a href="/contact.html">Contact</a>
+        </nav>
+      </header>
+
+      <main>
+        <h1>Privacy</h1>
+        <p class="lede">
+          PaintPad has no server, no accounts and no analytics. Your drawing never leaves your
+          browser, because there is nowhere for it to go.
+        </p>
+
+        <h2>The short version</h2>
+        <ul>
+          <li>No account, and nothing identifying you.</li>
+          <li>No analytics, advertising or third-party trackers.</li>
+          <li>No cookies set by the editor.</li>
+          <li>No network requests to any server other than the one serving this page.</li>
+          <li>Your drawing is stored on your own device and you can delete it at any time.</li>
+        </ul>
+
+        <h2>What is stored, and where</h2>
+        <p>
+          The editor saves to your browser's own storage so your work survives a reload. There
+          are exactly three places it writes to, all of them on your device and all of them
+          readable and removable by you.
+        </p>
+
+        <h3>IndexedDB</h3>
+        <dl>
+          <dt>Database <code>paintpad</code></dt>
+          <dd>
+            Object store <code>documents</code>, entry <code>current</code>. Holds one saved
+            document, as a log of drawing operations rather than as an image. Reloading
+            replays this log to rebuild the drawing. If you make changes and reload without
+            them being written — which can happen if the tab closes mid-save — a copy is
+            parked in <code>localStorage</code> under <code>paintpad.flush</code> and used on
+            your next visit.
+          </dd>
+        </dl>
+
+        <h3>localStorage</h3>
+        <dl>
+          <dt><code>paintpad.recents</code></dt>
+          <dd>
+            Up to twelve recently used colours, stored as hex strings such as
+            <code>#1b9e77</code>. Purely a convenience so recently used colours reappear. It is
+            never read by anything else.
+          </dd>
+          <dt><code>paintpad.flush</code></dt>
+          <dd>
+            A deferred copy of the pending save, used only when IndexedDB is unavailable —
+            private browsing modes, or a browser with site data disabled. It is overwritten on
+            each save and removed once the save lands.
+          </dd>
+        </dl>
+
+        <h2>Deleting your data</h2>
+        <p>
+          Clearing site data for this site removes all of the above at once — the saved
+          document, the recent colours and any pending save. There is no copy anywhere else,
+          so this is permanent and unrecoverable.
+        </p>
+        <p>
+          You can also clear it from inside the editor: the <strong>Clear</strong> button in the
+          toolbar erases the current drawing and its saved copy. Clearing recent colours
+          additionally requires clearing site data.
+        </p>
+
+        <h2>Analytics and advertising</h2>
+        <p>
+          As of the time of writing, PaintPad runs no analytics, no advertising and no
+          third-party scripts, and loads no fonts, images or code from third-party hosts. The
+          only network traffic is fetching the page and its own assets from the server that
+          hosts them.
+        </p>
+        <div class="note">
+          <p>
+            If advertising or analytics are ever added, this page has to be updated before they
+            ship, and where the law requires it — the UK, the EU and Switzerland, for example —
+            you will be asked for consent before anything is loaded.
+          </p>
+        </div>
+
+        <h2>Children</h2>
+        <p>
+          PaintPad is a general-audience drawing tool and collects no personal information from
+          anyone, including children under 13.
+        </p>
+
+        <h2>Changes to this policy</h2>
+        <p>
+          If this policy changes, the updated version will be posted on this page with a revised
+          date. Because no data is transmitted, there is nothing to notify you about and no
+          list of recipients to update.
+        </p>
+
+        <h2>Contact</h2>
+        <p>
+          Questions about any of the above go to the address on the
+          <a href="/contact.html">contact page</a>.
+        </p>
+      </main>
+
+      <footer class="site">
+        <p><a href="/">Back to the editor</a> · <a href="/about.html">About</a> · <a href="/terms.html">Terms</a> · <a href="/contact.html">Contact</a></p>
+      </footer>
+    </div>
+  </body>
+</html>

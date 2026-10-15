@@ -233,7 +233,12 @@ function App() {
     <>
       <div className="app">
       <header className="bar topbar">
-        <span className="brand">PaintPad</span>
+        {/* The brand doubles as the link to the About page, which in turn links every other
+            page. A visible link row beside it would spend canvas height that the three bars
+            do not have — e2e/responsive.spec.ts pins their combined share of the viewport. */}
+        <a className="brand" href="/about.html">
+          PaintPad
+        </a>
 
         <div className="group">
           <button
