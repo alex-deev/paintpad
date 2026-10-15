@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 import type { PaintRecord } from "../src/canvas/record";
 import type { ToolId } from "../src/canvas/record";
+import type { ExportTierId } from "../src/canvas/exportScale";
 
 const CANVAS = "canvas.surface";
 
@@ -31,6 +32,7 @@ declare global {
       loadRecords(records: PaintRecord[]): void;
       reset(): void;
       fitToStage(): void;
+      exportBlob(tier?: ExportTierId): Promise<Blob | null>;
     };
   }
 }

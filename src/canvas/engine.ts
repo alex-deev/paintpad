@@ -15,6 +15,7 @@
 
 import { normalizeHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
+import { exportDimensions, type ExportTierId } from "./exportScale";
 import {
   canRedo as historyCanRedo,
   canUndo as historyCanUndo,
@@ -1394,16 +1395,40 @@ export class Engine {
   }
 
   /**
-   * The document as a PNG blob.
+   * The document as a PNG blob, optionally downscaled to an export tier.
    *
    * A blob rather than a data URL: `toDataURL` base64-encodes roughly 15 MB of pixels into
    * a single string on the main thread, which is a visible stall on a large document.
+   *
+   * The document is composited at full raster size first — `renderDocument` stays the single
+   * source of truth — and a reduced tier is then drawn down onto a second canvas. Resizing
+   * the render scratch instead would mean re-running compositing per tier, and would put the
+   * blur in the one buffer everything else reads from.
+   *
+   * Defaults to `full`, so a caller that predates tiers keeps the exact bytes it had.
    */
-  exportBlob(): Promise<Blob | null> {
+  exportBlob(tier: ExportTierId = "full"): Promise<Blob | null> {
     const scratch = this.renderDocument();
     if (!scratch) return Promise.resolve(null);
+
+    const target = exportDimensions(this.doc, tier);
+    let source = scratch;
+    if (target.width !== scratch.width || target.height !== scratch.height) {
+      const scaled = document.createElement("canvas");
+      scaled.width = target.width;
+      scaled.height = target.height;
+      const ctx = scaled.getContext("2d");
+      if (!ctx) return Promise.resolve(null);
+      // The browser default is visibly soft when halving a 2560px image, and these are the
+      // pixels the user actually saves.
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(scratch, 0, 0, scaled.width, scaled.height);
+      source = scaled;
+    }
+
     return new Promise((resolve) => {
-      scratch.toBlob((blob) => resolve(blob), "image/png");
+      source.toBlob((blob) => resolve(blob), "image/png");
     });
   }
 
