@@ -15,7 +15,7 @@
 
 import { normalizeHex } from "./color";
 import { clampStrokeWidth, createDoc, rasterHeight, rasterWidth, type DocModel } from "./document";
-import { exportDimensions, type ExportTierId } from "./exportScale";
+import { exportDimensions, type ExportDimensions, type ExportTierId } from "./exportScale";
 import {
   canRedo as historyCanRedo,
   canUndo as historyCanUndo,
@@ -1392,6 +1392,17 @@ export class Engine {
   /** Debug/e2e affordance: the committed document as a PNG data URL. */
   snapshotDataUrl(): string | null {
     return this.renderDocument()?.toDataURL("image/png") ?? null;
+  }
+
+  /**
+   * Output pixel size for an export tier of the active document.
+   *
+   * A thin delegate, so the UI can label its size choices without reaching into the doc model.
+   * Safe to call during render: a document's size is fixed for its whole life, and the modal
+   * is the only caller.
+   */
+  exportSize(tier: ExportTierId): ExportDimensions {
+    return exportDimensions(this.doc, tier);
   }
 
   /**

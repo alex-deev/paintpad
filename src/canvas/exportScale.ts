@@ -29,7 +29,7 @@ const TIERS: Readonly<Record<ExportTierId, number | null>> = {
   full: null,
 };
 
-export const EXPORT_TIER_IDS: readonly ExportTierId[] = ["small", "standard", "full"];
+export const EXPORT_TIER_IDS = ["small", "standard", "full"] as const satisfies readonly ExportTierId[];
 
 /** Output pixel size for a tier. Reduced tiers scale the logical size; `full` is the raster size. */
 export function exportDimensions(doc: DocModel, tier: ExportTierId): ExportDimensions {

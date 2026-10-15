@@ -2,6 +2,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState, useSyncExternalSt
 import { createRoot } from "react-dom/client";
 import { DEFAULT_PALETTE, normalizeHex, readableTextOn } from "./canvas/color";
 import { Engine } from "./canvas/engine";
+import { exportTierLabel, EXPORT_TIER_IDS, type ExportTierId } from "./canvas/exportScale";
 import { prepareRecords } from "./canvas/record";
 import { decode, encode } from "./canvas/serialize";
 import { clearDocument, flushSave, loadDocument, saveDocument } from "./canvas/storage";
@@ -22,6 +23,22 @@ const TOOLS: { id: ToolId; key: string }[] = [
 ];
 
 const RECENTS_KEY = "paintpad.recents";
+
+/**
+ * Export size tiers. On unless explicitly disabled, so a missing or stale env file behaves
+ * like the shipped build rather than silently reverting to one-click export.
+ */
+const EXPORT_TIERS = import.meta.env.VITE_EXPORT_TIERS !== "false";
+
+/**
+ * Per-tier captions. Deliberately neutral: "high quality" would overclaim, since a smaller
+ * tier is a downscale of the same pixels rather than a different picture.
+ */
+const TIER_NOTES: Record<ExportTierId, string> = {
+  small: "Smaller file",
+  standard: "Balanced",
+  full: "Full resolution",
+};
 
 /** Autosave debounce. Long enough to coalesce a gesture, short enough to lose almost nothing. */
 const SAVE_DEBOUNCE_MS = 400;
@@ -53,6 +70,7 @@ function App() {
 
   const [slot, setSlot] = useState<Slot>("foreground");
   const [recents, setRecents] = useState<string[]>(loadRecents);
+  const [exporting, setExporting] = useState(false);
   const [hexDraft, setHexDraft] = useState("");
   const [hexError, setHexError] = useState(false);
   // Boot is asynchronous now: the autosave is read before the engine is attached, so the
@@ -212,7 +230,8 @@ function App() {
   }, [applyColour, hexDraft]);
 
   return (
-    <div className="app">
+    <>
+      <div className="app">
       <header className="bar topbar">
         <span className="brand">PaintPad</span>
 
@@ -262,8 +281,10 @@ function App() {
           <button
             type="button"
             data-testid="export"
-            onClick={() => void handleExport(engine)}
-            title="Download the document as a PNG, at the document's own resolution"
+            onClick={() =>
+              EXPORT_TIERS ? setExporting(true) : void handleExport(engine)
+            }
+            title="Download the document as a PNG"
           >
             Export
           </button>
@@ -468,7 +489,11 @@ function App() {
           {settings.recordCount} op{settings.recordCount === 1 ? "" : "s"}
         </span>
       </footer>
-    </div>
+      </div>
+      {exporting && (
+        <ExportDialog engine={engine} onClose={() => setExporting(false)} />
+      )}
+    </>
   );
 }
 
@@ -503,24 +528,148 @@ function Swatch({
 }
 
 /**
- * Download the document as a PNG.
+ * Hand a blob to the browser as a file download.
  *
- * The engine owns compositing (background beneath artwork, at the document's raster size);
- * the anchor plumbing belongs here. The object URL is revoked immediately after the click —
- * revoking it synchronously can race the download in some browsers, so it is deferred.
+ * The object URL is revoked on the next tick rather than synchronously — revoking it in the
+ * same tick can race the download in some browsers and silently cancel it.
  */
-async function handleExport(engine: Engine): Promise<void> {
-  const blob = await engine.exportBlob();
-  if (!blob) return;
-
+function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = engine.exportFilename();
+  anchor.download = filename;
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/**
+ * Download the document as a PNG at its full resolution.
+ *
+ * The engine owns compositing (background beneath artwork, at the document's raster size);
+ * the anchor plumbing belongs here.
+ */
+async function handleExport(engine: Engine): Promise<void> {
+  const blob = await engine.exportBlob();
+  if (!blob) return;
+  downloadBlob(blob, engine.exportFilename());
+}
+
+/**
+ * Track C insertion point for ad-supported tiers.
+ *
+ * Intentionally a no-op: PaintPad serves no ads today, and labelling a tier "ad-supported"
+ * before an ad exists would be a false claim. The rewarded-video and display units slot in
+ * here — between choosing a size and downloading, never beside the download button, which is
+ * the textbook accidental-click hazard. Any ad that fails to fill must resolve, never reject:
+ * an ad must not be able to block the export it is attached to.
+ */
+function adGateFor(_tier: ExportTierId): Promise<void> {
+  return Promise.resolve();
+}
+
+/**
+ * Export size chooser.
+ *
+ * Sequential rather than parallel, on purpose: the size buttons and the download button never
+ * share a view. That keeps any future ad step structurally unable to sit beside the action it
+ * could be mis-clicked as.
+ *
+ * A native <dialog> rather than a hand-rolled overlay, because it brings the focus trap,
+ * Escape handling, focus restoration on close, and the top layer for free — all things a
+ * correct overlay has to reimplement and usually gets wrong.
+ */
+function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [tier, setTier] = useState<ExportTierId | null>(null);
+
+  useEffect(() => {
+    const el = dialogRef.current;
+    if (el && !el.open) el.showModal();
+  }, []);
+
+  const size = tier === null ? null : engine.exportSize(tier);
+
+  async function confirm(): Promise<void> {
+    if (!tier) return;
+    await adGateFor(tier);
+    const blob = await engine.exportBlob(tier);
+    if (blob) downloadBlob(blob, engine.exportFilename());
+    onClose();
+  }
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="export"
+      aria-labelledby="export-title"
+      // Escape must go through React state, or the dialog would close itself while React
+      // still believed it was mounted.
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      // A backdrop click lands on the <dialog> itself. The panel inside carries all the
+      // padding, so this cannot fire from a gap inside the visible dialog.
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="export-panel">
+        <h2 id="export-title">Export</h2>
+
+        {tier === null ? (
+          <>
+            <p className="export-lead">
+              Choose an output size. Larger sizes take longer and make bigger files.
+            </p>
+            <div className="export-sizes" role="group" aria-label="Output size">
+              {EXPORT_TIER_IDS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  data-testid={`export-size-${id}`}
+                  onClick={() => setTier(id)}
+                >
+                  <span className="export-dims">{exportTierLabel(engine.exportSize(id))}</span>
+                  <span className="export-note">{TIER_NOTES[id]}</span>
+                </button>
+              ))}
+            </div>
+            <div className="export-actions">
+              <button type="button" onClick={onClose}>
+                Cancel
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="export-lead">
+              Exporting at <strong>{exportTierLabel(size!)}</strong> — {TIER_NOTES[tier]}.
+            </p>
+            {/* Track C: the rewarded-video step belongs here, between size and download. */}
+            <div className="export-actions">
+              <button
+                type="button"
+                className="primary"
+                data-testid="export-confirm"
+                onClick={() => void confirm()}
+              >
+                Download
+              </button>
+              <button type="button" onClick={() => setTier(null)}>
+                Back
+              </button>
+              <button type="button" onClick={onClose}>
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </dialog>
+  );
 }
 
 function ToolButton({

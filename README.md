@@ -57,8 +57,12 @@ The canvas opens **transparent**. Set a background from the second swatch and th
 restores it; leave it unset and erasing produces real transparency, which PNG export
 preserves.
 
-`Export` downloads a PNG at the document's own resolution (2560×1440 by default, since
-strokes are rasterised at 2×) — independent of your current zoom and display scaling.
+`Export` opens a size chooser offering three tiers — smaller file, balanced, and full
+resolution — as fractions of the document's own size, so a 1280×720 document at 2× raster
+offers 640×360, 1280×720 and 2560×1440. No tier exceeds the document's true raster size;
+a larger PNG is not more detail. Pick one and confirm to download. Set
+`VITE_EXPORT_TIERS=false` to restore one-click export at full resolution. Output is
+independent of your current zoom and display scaling.
 
 ## Responsive layout
 

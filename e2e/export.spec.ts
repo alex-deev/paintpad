@@ -13,6 +13,8 @@ import { canvasLocator, clearCanvas, drawStroke, setTool, setWidth } from "./hel
 async function exportFile(page: Page): Promise<{ name: string; bytes: Buffer }> {
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export" }).click();
+  await page.getByTestId("export-size-full").click();
+  await page.getByTestId("export-confirm").click();
   const download: Download = await downloadPromise;
   const path = await download.path();
   expect(path).not.toBeNull();

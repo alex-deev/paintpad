@@ -458,3 +458,82 @@ input[type="range"] {
     padding-bottom: max(6px, env(safe-area-inset-bottom));
   }
 }
+
+/* --- Export dialog ------------------------------------------------------- */
+
+/* No padding: it keeps a backdrop click from being able to land inside the visible box,
+   which is what makes `event.target === dialog` a reliable backdrop test. */
+.export {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  max-width: min(92vw, 460px);
+}
+
+.export::backdrop {
+  background: rgb(6 8 13 / 0.66);
+}
+
+.export-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+.export-panel h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.export-lead {
+  margin: 0;
+  color: var(--muted);
+}
+
+.export-sizes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.export-sizes button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px;
+  text-align: left;
+}
+
+.export-dims {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.export-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.export-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.export-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b1020;
+  font-weight: 600;
+}
+
+/* Phone widths: three across stops being legible long before this. */
+@media (max-width: 420px) {
+  .export-sizes {
+    grid-template-columns: 1fr;
+  }
+}
