@@ -1,5 +1,6 @@
 import { StrictMode, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
+import { setAnalyticsSink, track } from "./analytics";
 import { DEFAULT_PALETTE, normalizeHex, readableTextOn } from "./canvas/color";
 import { Engine } from "./canvas/engine";
 import { exportTierLabel, EXPORT_TIER_IDS, type ExportTierId } from "./canvas/exportScale";
@@ -173,6 +174,12 @@ function App() {
       // leak internals; the e2e suite runs against the dev server, where this is true.
       if (import.meta.env.DEV) {
         (window as unknown as { __paintpad: Engine }).__paintpad = engine;
+        // Same reasoning: lets the e2e suite observe the export funnel without shipping a
+        // provider. Installs nothing by itself -- the app keeps its no-op default until a
+        // test explicitly asks for a sink.
+        (
+          window as unknown as { __setAnalyticsSink: typeof setAnalyticsSink }
+        ).__setAnalyticsSink = setAnalyticsSink;
       }
 
       cleanup = () => {
@@ -217,6 +224,18 @@ function App() {
   );
 
   const hexInputRef = useRef<HTMLInputElement>(null);
+
+  // Reported here rather than on the dialog mounting: StrictMode double-invokes effects in
+  // development, which would count one click as two opens. A click is also the honest meaning
+  // of the event -- it is not "a component was mounted".
+  const openExport = useCallback(() => {
+    if (!EXPORT_TIERS) {
+      void handleExport(engine);
+      return;
+    }
+    track({ name: "export_modal_opened" });
+    setExporting(true);
+  }, [engine]);
 
   const commitHex = useCallback(() => {
     const ok = applyColour(hexDraft);
@@ -286,9 +305,7 @@ function App() {
           <button
             type="button"
             data-testid="export"
-            onClick={() =>
-              EXPORT_TIERS ? setExporting(true) : void handleExport(engine)
-            }
+            onClick={openExport}
             title="Download the document as a PNG"
           >
             Export
@@ -588,6 +605,8 @@ function adGateFor(_tier: ExportTierId): Promise<void> {
 function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [tier, setTier] = useState<ExportTierId | null>(null);
+  /** Distinguishes "the user got their file" from "the user changed their mind". */
+  const completed = useRef(false);
 
   useEffect(() => {
     const el = dialogRef.current;
@@ -596,11 +615,35 @@ function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void
 
   const size = tier === null ? null : engine.exportSize(tier);
 
+  function close(): void {
+    if (!completed.current) track({ name: "export_cancelled" });
+    onClose();
+  }
+
+  function choose(next: ExportTierId): void {
+    const chosen = engine.exportSize(next);
+    track({
+      name: "export_tier_selected",
+      tier: next,
+      width: chosen.width,
+      height: chosen.height,
+    });
+    setTier(next);
+  }
+
   async function confirm(): Promise<void> {
     if (!tier) return;
     await adGateFor(tier);
     const blob = await engine.exportBlob(tier);
-    if (blob) downloadBlob(blob, engine.exportFilename());
+    // Only a real file counts as a completion; a null blob means nothing was exported, and
+    // reporting that as a success would make the funnel lie.
+    if (!blob) {
+      close();
+      return;
+    }
+    downloadBlob(blob, engine.exportFilename());
+    completed.current = true;
+    track({ name: "export_completed", tier });
     onClose();
   }
 
@@ -613,12 +656,12 @@ function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void
       // still believed it was mounted.
       onCancel={(event) => {
         event.preventDefault();
-        onClose();
+        close();
       }}
       // A backdrop click lands on the <dialog> itself. The panel inside carries all the
       // padding, so this cannot fire from a gap inside the visible dialog.
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) close();
       }}
     >
       <div className="export-panel">
@@ -635,7 +678,7 @@ function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void
                   key={id}
                   type="button"
                   data-testid={`export-size-${id}`}
-                  onClick={() => setTier(id)}
+                  onClick={() => choose(id)}
                 >
                   <span className="export-dims">{exportTierLabel(engine.exportSize(id))}</span>
                   <span className="export-note">{TIER_NOTES[id]}</span>
@@ -643,7 +686,7 @@ function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void
               ))}
             </div>
             <div className="export-actions">
-              <button type="button" onClick={onClose}>
+              <button type="button" onClick={close}>
                 Cancel
               </button>
             </div>
@@ -666,7 +709,7 @@ function ExportDialog({ engine, onClose }: { engine: Engine; onClose: () => void
               <button type="button" onClick={() => setTier(null)}>
                 Back
               </button>
-              <button type="button" onClick={onClose}>
+              <button type="button" onClick={close}>
                 Cancel
               </button>
             </div>

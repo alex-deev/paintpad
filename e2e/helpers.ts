@@ -34,6 +34,8 @@ declare global {
       fitToStage(): void;
       exportBlob(tier?: ExportTierId): Promise<Blob | null>;
     };
+    /** DEV-only hook, so the suite can install a sink the way a real provider would be. */
+    __setAnalyticsSink(sink: ((event: unknown) => void) | null): void;
   }
 }
 
