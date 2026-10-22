@@ -54,7 +54,7 @@ import {
   type Viewport,
 } from "./viewport";
 
-export const DEFAULT_FOREGROUND = "#1f2430";
+export const DEFAULT_FOREGROUND = "#ffffff";
 /**
  * The canvas background. `null` means transparent — the default — rather than an opaque
  * colour, so a new document is genuinely empty and PNG export carries real alpha.
